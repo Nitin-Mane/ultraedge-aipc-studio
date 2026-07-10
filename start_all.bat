@@ -2,8 +2,6 @@
 title UltraEdge AIPC Studio Launcher
 echo ===================================================
 echo   UltraEdge AIPC Studio - Startup Launcher
-echo   Powered by OpenVINO Toolkit and React/Vite
-echo   Developer: Mr. Nitin Mane
 echo ===================================================
 echo.
 
