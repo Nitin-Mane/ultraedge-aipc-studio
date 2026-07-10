@@ -4,7 +4,7 @@
   <img src="frontend/public/ultraedge.svg" alt="UltraEdge Logo" width="120" height="120" />
   <h3>Local-First AI PC Developer Console</h3>
   
-  [![CI/CD Pipeline](https://github.com/open-source/UltraEdge-AIPC-Studio/actions/workflows/ci.yml/badge.svg)](https://github.com/open-source/UltraEdge-AIPC-Studio/actions/workflows/ci.yml)
+  [![CI/CD Pipeline](https://github.com/Nitin-Mane/ultraedge-aipc-studio/actions/workflows/ci.yml/badge.svg)](https://github.com/Nitin-Mane/ultraedge-aipc-studio/actions/workflows/ci.yml)
   [![License: Apache 2.0](https://img.shields.io/badge/License-Apache_2.0-blue.svg)](https://opensource.org/licenses/Apache-2.0)
   [![Release Version](https://img.shields.io/badge/release-v0.1.1--alpha-purple.svg)]()
   [![Platform: Windows](https://img.shields.io/badge/platform-Windows-teal.svg)]()
@@ -135,7 +135,7 @@ The application relies on these main packages:
 
 ## 📊 Star History
 
-[![Star History Chart](https://api.star-history.com/svg?repos=open-source/UltraEdge-AIPC-Studio&type=Date)](https://star-history.com/#open-source/UltraEdge-AIPC-Studio&Date)
+[![Star History Chart](https://api.star-history.com/svg?repos=Nitin-Mane/ultraedge-aipc-studio&type=Date)](https://star-history.com/#Nitin-Mane/ultraedge-aipc-studio&Date)
 
 ---
 
