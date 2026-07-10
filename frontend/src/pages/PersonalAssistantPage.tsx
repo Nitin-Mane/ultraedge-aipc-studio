@@ -81,7 +81,7 @@ export function PersonalAssistantPage() {
   const [isMicActive, setIsMicActive] = useState(false)
   const [phase, setPhase] = useState<PagePhase>(selectedModel ? 'ready' : (searchParams.get('loaded') === 'true' ? 'ready' : 'select'))
   const [hardware, setHardware] = useState<HardwareProfile>(DEFAULT_HARDWARE)
-  const activeDevice = selectedModel?.recommendedDevice || (hardware.supported_devices.includes('GPU') ? 'GPU' : (hardware.supported_devices.includes('NPU') ? 'NPU' : 'CPU'))
+  const [activeDevice, setActiveDevice] = useState<string>('GPU')
   const abortRef = useRef<AbortController | null>(null)
   const messagesEndRef = useRef<HTMLDivElement>(null)
   const messagesContainerRef = useRef<HTMLDivElement>(null)
@@ -412,6 +412,7 @@ export function PersonalAssistantPage() {
 
   const [copiedMessageId, setCopiedMessageId] = useState<string | null>(null)
   const [speakingMessageId, setSpeakingMessageId] = useState<string | null>(null)
+  const [ttsProcessingId, setTtsProcessingId] = useState<string | null>(null)
   const [activeAudio, setActiveAudio] = useState<HTMLAudioElement | null>(null)
 
   const handleCopy = (messageId: string, text: string) => {
@@ -421,52 +422,50 @@ export function PersonalAssistantPage() {
   }
 
   const handleReadAloud = (messageId: string, text: string) => {
-    if (speakingMessageId === messageId) {
+    if (speakingMessageId === messageId || ttsProcessingId === messageId) {
       if (activeAudio) {
         activeAudio.pause()
         setActiveAudio(null)
       }
       window.speechSynthesis.cancel()
       setSpeakingMessageId(null)
+      setTtsProcessingId(null)
     } else {
       if (activeAudio) {
         activeAudio.pause()
       }
       window.speechSynthesis.cancel()
-      setSpeakingMessageId(messageId)
-      
+      setSpeakingMessageId(null)
+      setTtsProcessingId(messageId)   // show processing banner immediately
+
       const speaker = localStorage.getItem('voice_id') || 'Chelsie'
-      const audioUrl = `${BACKEND_URL}/api/chat/tts?text=${encodeURIComponent(text)}&msg_id=${messageId}&speaker=${encodeURIComponent(speaker)}`
+      const plain = text.replace(/[#*`>|_]/g, '').replace(/\[(.*?)\]\(.*?\)/g, '$1').slice(0, 600)
+      const audioUrl = `${BACKEND_URL}/api/chat/tts?text=${encodeURIComponent(plain)}&msg_id=${messageId}&speaker=${encodeURIComponent(speaker)}`
       const audio = new Audio(audioUrl)
-      
+
+      audio.oncanplay = () => {
+        setTtsProcessingId(null)   // backend responded — hide processing banner
+        setSpeakingMessageId(messageId)
+      }
       audio.onended = () => {
         setSpeakingMessageId(null)
         setActiveAudio(null)
       }
       audio.onerror = () => {
+        setTtsProcessingId(null)
         console.warn('Backend TTS failed, falling back to browser synthesis API')
-        const utterance = new SpeechSynthesisUtterance(text)
-        utterance.onend = () => {
-          setSpeakingMessageId(null)
-          setActiveAudio(null)
-        }
-        utterance.onerror = () => {
-          setSpeakingMessageId(null)
-          setActiveAudio(null)
-        }
+        const utterance = new SpeechSynthesisUtterance(plain)
+        setSpeakingMessageId(messageId)
+        utterance.onend = () => { setSpeakingMessageId(null); setActiveAudio(null) }
+        utterance.onerror = () => { setSpeakingMessageId(null); setActiveAudio(null) }
         window.speechSynthesis.speak(utterance)
       }
-      audio.play().catch((err) => {
-        console.warn('Audio play failed, falling back to browser synthesis API:', err)
-        const utterance = new SpeechSynthesisUtterance(text)
-        utterance.onend = () => {
-          setSpeakingMessageId(null)
-          setActiveAudio(null)
-        }
-        utterance.onerror = () => {
-          setSpeakingMessageId(null)
-          setActiveAudio(null)
-        }
+      audio.play().catch(() => {
+        setTtsProcessingId(null)
+        const utterance = new SpeechSynthesisUtterance(plain)
+        setSpeakingMessageId(messageId)
+        utterance.onend = () => { setSpeakingMessageId(null); setActiveAudio(null) }
+        utterance.onerror = () => { setSpeakingMessageId(null); setActiveAudio(null) }
         window.speechSynthesis.speak(utterance)
       })
       setActiveAudio(audio)
@@ -547,6 +546,22 @@ export function PersonalAssistantPage() {
     }
     fetchHardware()
   }, [])
+
+  // Fetch actual loaded device from runtime so the badge is always accurate
+  useEffect(() => {
+    const fetchActive = async () => {
+      try {
+        const res = await fetch(`${BACKEND_URL}/api/runtime/active`)
+        if (res.ok) {
+          const data = await res.json()
+          if (data?.device) setActiveDevice(data.device.toUpperCase())
+        }
+      } catch { /* keep default */ }
+    }
+    fetchActive()
+    const iv = setInterval(fetchActive, 8000)
+    return () => clearInterval(iv)
+  }, [selectedModel])
 
   const handleSend = async (customInput?: string) => {
     const textToSend = customInput !== undefined ? customInput : input
@@ -1318,8 +1333,12 @@ export function PersonalAssistantPage() {
                                   
                                   <button
                                     onClick={() => handleReadAloud(msg.id, msg.content)}
-                                    className={`p-1 hover:bg-aurora-surface-hover rounded transition-colors ${speakingMessageId === msg.id ? 'text-edge-cyan animate-pulse' : 'hover:text-edge-cyan'}`}
-                                    title="Read aloud"
+                                    className={`p-1 hover:bg-aurora-surface-hover rounded transition-colors ${
+                                      speakingMessageId === msg.id ? 'text-edge-cyan animate-pulse'
+                                      : ttsProcessingId === msg.id ? 'text-amber-400 animate-spin'
+                                      : 'hover:text-edge-cyan'
+                                    }`}
+                                    title={ttsProcessingId === msg.id ? 'Synthesising speech…' : speakingMessageId === msg.id ? 'Stop' : 'Read aloud'}
                                   >
                                     <Volume2 className="w-3.5 h-3.5" />
                                   </button>
@@ -1337,6 +1356,23 @@ export function PersonalAssistantPage() {
                           </div>
                         </motion.div>
                       ))}
+                      {/* TTS processing toast */}
+                      {ttsProcessingId && (
+                        <motion.div
+                          initial={{ opacity: 0, y: 8 }}
+                          animate={{ opacity: 1, y: 0 }}
+                          className="flex justify-start"
+                        >
+                          <div className="flex items-center gap-2 bg-amber-500/10 border border-amber-400/30 rounded-xl px-4 py-2 text-xs text-amber-300">
+                            <div className="flex gap-1">
+                              <div className="w-1.5 h-1.5 bg-amber-400 rounded-full animate-bounce" style={{ animationDelay: '0ms' }} />
+                              <div className="w-1.5 h-1.5 bg-amber-400 rounded-full animate-bounce" style={{ animationDelay: '120ms' }} />
+                              <div className="w-1.5 h-1.5 bg-amber-400 rounded-full animate-bounce" style={{ animationDelay: '240ms' }} />
+                            </div>
+                            <span className="font-medium">Synthesising speech on GPU · token2wav running…</span>
+                          </div>
+                        </motion.div>
+                      )}
                       {/* Show only while waiting for the first token — once the answer streams above, hide it */}
                       {isGenerating && !(messages[messages.length - 1]?.role === 'assistant' && messages[messages.length - 1]?.content) && (
                         <motion.div

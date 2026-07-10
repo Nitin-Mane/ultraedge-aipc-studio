@@ -70,7 +70,7 @@ export function ProfileRegistration({ onComplete }: ProfileRegistrationProps) {
             <input 
               type="text" 
               required
-              placeholder="e.g. Mr. Nitin Mane"
+              placeholder="e.g. Developer"
               value={name}
               onChange={(e) => setName(e.target.value)}
               className="input-field text-sm bg-aurora-base border-aurora-border/60"

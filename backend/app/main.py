@@ -23,7 +23,47 @@ from app.api.workspace import router as workspace_router
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger("main")
 
-app = FastAPI(title="UltraEdge AIPC Studio API", version="0.1.0-alpha")
+from contextlib import asynccontextmanager
+
+@asynccontextmanager
+async def lifespan(app: FastAPI):
+    # ── startup ──────────────────────────────────────────────────────────
+    init_db()
+    conn = get_db_connection()
+    cursor = conn.cursor()
+    stuck_states = ('downloading', 'converting', 'quantizing', 'benchmarking', 'verifying', 'queued', 'running')
+    cursor.execute(
+        "UPDATE model_registry SET status = 'not-installed', updated_at = ? WHERE status IN ({})".format(
+            ','.join('?' * len(stuck_states))
+        ),
+        (datetime.now().isoformat(), *stuck_states)
+    )
+    cursor.execute(
+        "UPDATE model_jobs SET status = 'cancelled', message = 'Cancelled on server restart', finished_at = ? WHERE status = 'running'",
+        (datetime.now().isoformat(),)
+    )
+    conn.commit()
+    conn.close()
+    log_audit("system_startup", "FastAPI backend server started")
+    from app.maintenance import start_scheduler
+    start_scheduler()
+    last_model = get_setting("active_model")
+    if last_model:
+        def _restore():
+            try:
+                logger.info(f"Auto-restoring last active model: {last_model}")
+                RuntimeManager.load_model(
+                    last_model,
+                    get_setting("active_device") or "AUTO",
+                    get_setting("active_precision") or "INT4",
+                )
+            except Exception as e:
+                logger.error(f"Model auto-restore failed: {e}")
+        threading.Thread(target=_restore, daemon=True).start()
+    yield
+    # ── shutdown (nothing needed) ─────────────────────────────────────────
+
+app = FastAPI(title="UltraEdge AIPC Studio API", version="0.1.0-alpha", lifespan=lifespan)
 
 # Enable CORS for frontend dev server
 app.add_middleware(
@@ -82,45 +122,6 @@ class SettingsUpdateRequest(BaseModel):
 class ModelStatusUpdateRequest(BaseModel):
     status: str
 
-@app.on_event("startup")
-def on_startup():
-    init_db()
-    # Clear any stuck downloading/converting states on restart
-    conn = get_db_connection()
-    cursor = conn.cursor()
-    stuck_states = ('downloading', 'converting', 'quantizing', 'benchmarking', 'verifying', 'queued', 'running')
-    cursor.execute(
-        "UPDATE model_registry SET status = 'not-installed', updated_at = ? WHERE status IN ({})".format(
-            ','.join('?' * len(stuck_states))
-        ),
-        (datetime.now().isoformat(), *stuck_states)
-    )
-    # Cancel any orphaned running jobs
-    cursor.execute(
-        "UPDATE model_jobs SET status = 'cancelled', message = 'Cancelled on server restart', finished_at = ? WHERE status = 'running'",
-        (datetime.now().isoformat(),)
-    )
-    conn.commit()
-    conn.close()
-    log_audit("system_startup", "FastAPI backend server started")
-    # Auto-maintenance: cleanup pass now, then hourly (cache prune + memory trim)
-    from app.maintenance import start_scheduler
-    start_scheduler()
-    # Auto-restore the last active model so chat/TTS survive restarts without
-    # anyone having to reload manually (the root cause of chord-only TTS).
-    last_model = get_setting("active_model")
-    if last_model:
-        def _restore():
-            try:
-                logger.info(f"Auto-restoring last active model: {last_model}")
-                RuntimeManager.load_model(
-                    last_model,
-                    get_setting("active_device") or "AUTO",
-                    get_setting("active_precision") or "INT4",
-                )
-            except Exception as e:
-                logger.error(f"Model auto-restore failed: {e}")
-        threading.Thread(target=_restore, daemon=True).start()
 
 # --- Endpoints ---
 

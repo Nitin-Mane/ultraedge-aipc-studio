@@ -32,7 +32,7 @@ Double-click the **`start_all.bat`** file in the root of the project. This will 
 #### 1. Setup Backend Environment
 
 1. **Install OpenVINO Toolkit Drivers**:
-   Go to the [Intel OpenVINO Installation Guide](https://docs.openvino.ai/latest/openvino_install_guides.html) and follow the instructions to install the OpenVINO toolkit runtime matching your OS and hardware.
+   Go to the [Intel OpenVINO Installation Guide](https://www.intel.com/content/www/us/en/developer/tools/openvino-toolkit/download.html) and follow the instructions to install the OpenVINO toolkit runtime matching your OS and hardware.
 
 2. **Activate the Default Environment**:
    By documentation, OpenVINO installs into a default environment named `openvino_env`. Create or activate your default conda environment:

@@ -304,12 +304,12 @@ export function SettingsPage() {
 
                         <div className="space-y-3">
                           <div className="flex items-center justify-between p-3 rounded-lg bg-aurora-surface/30">
-                            <span className="text-sm text-text-secondary">Developer</span>
-                            <span className="text-sm font-medium text-text-primary">Mr. Nitin Mane</span>
+                            <span className="text-sm text-text-secondary">Contributors</span>
+                            <span className="text-sm font-medium text-text-primary">Mr. Nitin Mane & Community</span>
                           </div>
                           <div className="flex items-center justify-between p-3 rounded-lg bg-aurora-surface/30">
-                            <span className="text-sm text-text-secondary">Role</span>
-                            <span className="text-sm font-medium text-text-primary">Intel Software Innovator</span>
+                            <span className="text-sm text-text-secondary">Status</span>
+                            <span className="text-sm font-medium text-text-primary">Open Source Development</span>
                           </div>
                           <div className="flex items-center justify-between p-3 rounded-lg bg-aurora-surface/30">
                             <span className="text-sm text-text-secondary">Powered By</span>
