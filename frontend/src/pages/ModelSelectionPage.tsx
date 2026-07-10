@@ -243,7 +243,7 @@ export function ModelSelectionPage() {
 
       {/* Author signature footer matches bot */}
       <div className="text-center text-xs text-text-muted opacity-85 py-6 mt-4 tracking-wider">
-        Developed by <a href="https://github.com/Nitin-Mane" target="_blank" rel="noopener noreferrer" className="text-edge-cyan font-bold hover:underline">Mr. Nitin Mane</a>, Intel Software Innovator
+        Contributed by the Open Source Community
       </div>
 
     </div>

@@ -108,11 +108,13 @@ class RuntimeManager:
                     add_runtime_log("[RUNTIME] Initializing processor...")
                     _processor = AutoProcessor.from_pretrained(model_dir)
                     
-                    thinker_dev = device
-                    audio_dev = "CPU" # Force CPU for ASR speech model to prevent NPU compiler dynamic shape crash
-                    dit_dev = "CPU" # token2wav DIT/BigVGAN on this iGPU returns an all-zero waveform (even with f32 hint) — CPU produces correct audio
+                    # Thinker (LLM) and Audio ASR encoder run on GPU.
+                    # token2wav DIT/BigVGAN vocoder must stay on CPU — GPU f32 yields a silent waveform.
+                    thinker_dev = "GPU" if has_gpu else "CPU"
+                    audio_dev   = "GPU" if has_gpu else "CPU"  # ASR encoder: GPU accelerated
+                    dit_dev     = "CPU"                         # token2wav DIT/BigVGAN: CPU only
                     
-                    add_runtime_log(f"[DEVICE] Hardware Mapping - Thinker: {thinker_dev}, Audio ASR: {audio_dev}, Vision DiT: {dit_dev}")
+                    add_runtime_log(f"[DEVICE] Omni mapping — Thinker: {thinker_dev}, Audio ASR: {audio_dev}, token2wav DiT: {dit_dev}")
                     add_runtime_log("[RUNTIME] Compiling OpenVINO sub-models (this can take several seconds to optimize on target devices)...")
                     
                     try:
