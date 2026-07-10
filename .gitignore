@@ -1,0 +1,41 @@
+# Frontend Node / Build output
+node_modules/
+dist/
+dist-ssr/
+*.local
+.vite/
+
+# Python caching
+__pycache__/
+*.pyc
+*.pyo
+*.pyd
+.pytest_cache/
+.venv/
+env/
+venv/
+
+# App Storage Cache (Ignore heavy data & database files)
+app_data/*.db
+app_data/documents/*
+models/*
+!models/.gitkeep
+!app_data/.gitkeep
+
+# IDE Logs
+.idea/
+.vscode/
+*.suo
+*.ntvs*
+*.njsproj
+*.sln
+*.sw?
+
+# Databases (SQLite) & runtime caches
+*.db
+backend/app_data/
+backend/models/
+ov_cache/
+
+# Conda / logs
+*.log

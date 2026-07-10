@@ -1,0 +1,14 @@
+target-version = "py311"
+line-length = 120
+exclude = ["models", "app_data", "__pycache__"]
+
+[lint]
+# E/F: pycodestyle+pyflakes, I: import order, B: bugbear, UP: pyupgrade
+select = ["E", "F", "I", "B", "UP"]
+ignore = [
+    "E501",  # long lines — handled progressively, not a merge blocker
+    "B008",  # FastAPI Depends()/File() in defaults is idiomatic
+]
+
+[lint.per-file-ignores]
+"app/runtime/inference.py" = ["E722"]  # legacy bare excepts; cleanup tracked in Phase 2

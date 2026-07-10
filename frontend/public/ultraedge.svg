@@ -1,0 +1,22 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 64 64">
+  <defs>
+    <linearGradient id="ue-bg" x1="0" y1="0" x2="1" y2="1">
+      <stop offset="0" stop-color="#4f46e5"/>
+      <stop offset=".55" stop-color="#22d3ee"/>
+      <stop offset="1" stop-color="#a855f7"/>
+    </linearGradient>
+    <linearGradient id="ue-edge" x1="0" y1="1" x2="1" y2="0">
+      <stop offset="0" stop-color="#ffffff"/>
+      <stop offset="1" stop-color="#e0f7ff"/>
+    </linearGradient>
+  </defs>
+  <rect x="2" y="2" width="60" height="60" rx="16" fill="url(#ue-bg)"/>
+  <rect x="2" y="2" width="60" height="60" rx="16" fill="none" stroke="rgba(255,255,255,.25)" stroke-width="1.5"/>
+  <!-- U -->
+  <path d="M17 16v18a8 8 0 0 0 8 8h3v-7h-2.5a2.5 2.5 0 0 1-2.5-2.5V16z" fill="url(#ue-edge)"/>
+  <!-- E as stacked edge bars, sheared for speed -->
+  <path d="M32 16h15l-3 7H32zM32 27.5h11l-3 7h-8zM32 39h15l-3 7H32z" fill="url(#ue-edge)"/>
+  <!-- circuit node accents -->
+  <circle cx="20.5" cy="48" r="2.5" fill="#e0f7ff"/>
+  <path d="M20.5 45.5V42" stroke="#e0f7ff" stroke-width="2" stroke-linecap="round"/>
+</svg>
