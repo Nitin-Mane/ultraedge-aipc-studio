@@ -1,11 +1,16 @@
 # UltraEdge AIPC Studio
 
-[![CI/CD Pipeline](https://github.com/open-source/UltraEdge-AIPC-Studio/actions/workflows/ci.yml/badge.svg)](https://github.com/open-source/UltraEdge-AIPC-Studio/actions/workflows/ci.yml)
-[![Release](https://img.shields.io/badge/release-v0.1.1--alpha-315D8C)](doc/CHANGELOG.md)
-[![Python](https://img.shields.io/badge/python-3.10%2B-3776AB)](https://www.python.org/)
-[![Node.js](https://img.shields.io/badge/node.js-20.19%2B-339933)](https://nodejs.org/)
-[![Platform](https://img.shields.io/badge/platform-Windows%20%7C%20Linux-555555)](#operating-requirements)
-[![License](https://img.shields.io/badge/license-Apache%202.0-D22128)](LICENSE)
+<div align="center">
+  <img src="frontend/public/ultraedge.svg" alt="UltraEdge Logo" width="120" height="120" />
+  <h3>Local-First AI PC Developer Console</h3>
+  
+  [![CI/CD Pipeline](https://github.com/Nitin-Mane/ultraedge-aipc-studio/actions/workflows/ci.yml/badge.svg)](https://github.com/Nitin-Mane/ultraedge-aipc-studio/actions/workflows/ci.yml)
+  [![Release](https://img.shields.io/badge/release-v0.1.1--alpha-315D8C)](doc/CHANGELOG.md)
+  [![Python](https://img.shields.io/badge/python-3.10%2B-3776AB)](https://www.python.org/)
+  [![Node.js](https://img.shields.io/badge/node.js-20.19%2B-339933)](https://nodejs.org/)
+  [![Platform](https://img.shields.io/badge/platform-Windows%20%7C%20Linux-555555)](#operating-requirements)
+  [![License](https://img.shields.io/badge/license-Apache%202.0-D22128)](LICENSE)
+</div>
 
 ## Project status
 
@@ -125,6 +130,8 @@ Benchmark Studio reports throughput, first-token latency, memory use, and model
 load time when measured results are available. The empty state is shown below.
 
 ![Benchmark Studio empty state](docs/screenshots/benchmark-studio.png)
+
+[![Star History Chart](https://api.star-history.com/svg?repos=Nitin-Mane/ultraedge-aipc-studio&type=Date)](https://star-history.com/#Nitin-Mane/ultraedge-aipc-studio&Date)
 
 ### Security and Privacy
 
