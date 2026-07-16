@@ -1,11 +1,15 @@
+import logging
 import platform
 import shutil
 import subprocess
-import logging
+
+from app.hardware.suitability import assess_hardware_suitability, detect_cpu_name
 
 logger = logging.getLogger("scanner")
 
 def _run_powershell(command: str) -> str:
+    if platform.system() != "Windows":
+        return ""
     try:
         result = subprocess.run(
             ["powershell", "-NoProfile", "-Command", command],
@@ -24,7 +28,7 @@ def scan_hardware():
     logger.info("Starting system hardware scan...")
 
     # ── CPU ─────────────────────────────────────────────────────
-    cpu_name = platform.processor() or "Intel Core Processor"
+    cpu_name = detect_cpu_name()
     ps_cpu = _run_powershell(
         "Get-CimInstance Win32_Processor | Select-Object -ExpandProperty Name"
     )
@@ -105,6 +109,14 @@ def scan_hardware():
         "supported_devices": ["CPU"]
     }
 
+    suitability = assess_hardware_suitability(cpu_name)
+    profile.update({
+        "suitable": suitability.suitable,
+        "suitability": "supported" if suitability.suitable else "unsupported",
+        "suitability_reason": suitability.reason,
+        "hardware_requirement": suitability.requirement,
+    })
+
     # ── OpenVINO detection ─────────────────────────────────────
     try:
         import openvino as ov
@@ -132,11 +144,6 @@ def scan_hardware():
         logger.warning(f"OpenVINO not available: {e}")
         profile["openvino_status"] = "not_available"
         profile["supported_devices"] = ["CPU"]
-
-        # Fallback NPU detection on Intel Core Ultra systems
-        if npu_status == "not_detected" and ("Ultra" in cpu_name or "Intel" in cpu_name):
-            profile["npu"] = "detected"
-            profile["supported_devices"].append("NPU")
 
     logger.info(f"Scan complete: {profile}")
     return profile

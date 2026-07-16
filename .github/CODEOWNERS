@@ -1,0 +1,16 @@
+# Owners — one review required from any owner for PRs
+
+# Backend
+backend/app/api/       @ultraedge-maintainers
+backend/app/runtime/   @ultraedge-maintainers
+backend/app/memory/    @ultraedge-maintainers
+
+# Frontend
+frontend/src/pages/    @ultraedge-maintainers
+frontend/src/api/      @ultraedge-maintainers
+frontend/src/store/    @ultraedge-maintainers
+
+# CI / Config
+.github/               @ultraedge-maintainers
+*.toml                 @ultraedge-maintainers
+*.json                 @ultraedge-maintainers

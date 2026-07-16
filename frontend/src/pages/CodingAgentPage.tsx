@@ -3,18 +3,24 @@ import { useNavigate } from 'react-router-dom'
 import { motion, AnimatePresence } from 'framer-motion'
 import { 
   Code2, File, Folder, FolderOpen, Play, Save, Copy, 
-  Settings, Terminal, GitBranch, Zap, Cpu, ChevronRight,
+  Terminal, GitBranch, Zap, Cpu, ChevronRight,
   ChevronDown, FileCode, FileText, FileJson, FileCog,
   Send, Loader2, CheckCircle2, AlertCircle, RefreshCw,
   Wand2, Bug, RefreshCcw, Search, X, ArrowRight, RotateCw,
   Upload, Plus, Trash2, Edit3, MoreVertical, Server, Swords,
-  ChevronLeft, MessageSquare, Paperclip, FolderPlus, Sparkles, Bot
+  ChevronLeft, MessageSquare, Paperclip, FolderPlus, Sparkles, Bot,
+  HardDrive, MemoryStick, ShieldCheck, Monitor, Wifi, WifiOff, Layers
 } from 'lucide-react'
 import { useAppStore } from '../store/useAppStore'
 import { Button } from '../components/Button'
+import { CodeEditor } from '../components/CodeEditor'
+import { ChatHistoryPanel } from '../components/ChatHistoryPanel'
 import ReactMarkdown from 'react-markdown'
 import remarkGfm from 'remark-gfm'
 import { CoderArenaPage } from './coderArena'
+import { MCPServerPanel } from './MCPServerPanel'
+import { SchedulerPanel } from './SchedulerPanel'
+import { HooksPanel } from './HooksPanel'
 import { AgentPage, AgentSettings, DEFAULT_AGENT_SETTINGS } from './AgentPage'
 
 const BACKEND_URL = 'http://localhost:8000'
@@ -144,7 +150,7 @@ function ProjectTree({ items, level = 0, onSelect, selectedPath, onContextMenu, 
 
 export function CodingAgentPage() {
   const navigate = useNavigate()
-  const { selectedModel, setSelectedModel } = useAppStore()
+  const { selectedModel, setSelectedModel, mcpTools } = useAppStore()
   const [isGenerating, setIsGenerating] = useState(false)
   const [viewPhase, setViewPhase] = useState<ViewPhase>('select')
   const [hardware, setHardware] = useState<any>(null)
@@ -154,6 +160,8 @@ export function CodingAgentPage() {
   
   const [chatMessages, setChatMessages] = useState<ChatMessage[]>([])
   const [chatInput, setChatInput] = useState('')
+  const [chatSessionId] = useState(() => `session_${Date.now()}_${Math.random().toString(36).slice(2, 8)}`)
+  const [showHistory, setShowHistory] = useState(false)
   const chatEndRef = useRef<HTMLDivElement>(null)
   
   const abortRef = useRef<AbortController | null>(null)
@@ -180,7 +188,9 @@ export function CodingAgentPage() {
   const [gameRound, setGameRound] = useState(0)
   const [showCoderArena, setShowCoderArena] = useState(false)
   const [showAgent, setShowAgent] = useState(false)
-  const [agentMode, setAgentMode] = useState(false)
+  const [showMCPServer, setShowMCPServer] = useState(false)
+  const [showScheduler, setShowScheduler] = useState(false)
+  const [showHooks, setShowHooks] = useState(false)
   const [agentRunning, setAgentRunning] = useState(false)
   const [agentSettings, setAgentSettings] = useState<AgentSettings>(DEFAULT_AGENT_SETTINGS)
 
@@ -194,6 +204,8 @@ export function CodingAgentPage() {
   // Resizable panel state
   const [explorerWidth, setExplorerWidth] = useState(240)
   const [chatWidth, setChatWidth] = useState(340)
+  const [explorerCollapsed, setExplorerCollapsed] = useState(() => window.innerWidth < 1100)
+  const [chatCollapsed, setChatCollapsed] = useState(() => window.innerWidth < 720)
   const [editorHeightRatio, setEditorHeightRatio] = useState(0.5)
   const draggingRef = useRef<'explorer' | 'chat' | 'editor-terminal' | null>(null)
   const containerRef = useRef<HTMLDivElement>(null)
@@ -206,6 +218,31 @@ export function CodingAgentPage() {
   const [problems, setProblems] = useState<Array<{ type: 'error' | 'warning' | 'info'; message: string; file?: string; line?: number }>>([])
   const [outputLogs, setOutputLogs] = useState<string[]>([])
   const textareaRef = useRef<HTMLTextAreaElement>(null)
+
+  useEffect(() => {
+    const fitPanelsToViewport = () => {
+      if (window.innerWidth < 720) {
+        setExplorerCollapsed(true)
+        setChatCollapsed(true)
+      } else if (window.innerWidth < 1100) {
+        setExplorerCollapsed(true)
+      }
+    }
+
+    fitPanelsToViewport()
+    window.addEventListener('resize', fitPanelsToViewport)
+    return () => window.removeEventListener('resize', fitPanelsToViewport)
+  }, [])
+
+  const toggleExplorerPanel = () => {
+    if (explorerCollapsed && window.innerWidth < 900) setChatCollapsed(true)
+    setExplorerCollapsed(current => !current)
+  }
+
+  const toggleChatPanel = () => {
+    if (chatCollapsed && window.innerWidth < 900) setExplorerCollapsed(true)
+    setChatCollapsed(current => !current)
+  }
 
   const retryGame = () => {
     setGameScore(0)
@@ -831,15 +868,75 @@ export function CodingAgentPage() {
     const currentInput = msgToSend
     setChatInput('')
 
-    if (agentMode && workspacePath) {
-      agentLoop(currentInput)
+    // Detect clearly conversational inputs — route to Omni chat instead of Coder
+    const conversationalPatterns = [
+      'hello', 'hi', 'hey', 'good morning', 'good evening', 'good afternoon',
+      'how are you', 'what are you', 'who are you', 'what can you do',
+      'help', 'thanks', 'thank you', 'bye', 'goodbye', 'what is',
+      'tell me about', 'what do you', 'can you',
+    ]
+    const isConversational = (
+      currentInput.split(/\s+/).length <= 6
+      && conversationalPatterns.some(p => currentInput.toLowerCase().startsWith(p) || currentInput.toLowerCase() === p)
+    )
+
+    if (isConversational) {
+      setIsGenerating(true)
+      const assistantMsg: ChatMessage = { id: `msg_${Date.now()}_ai`, role: 'assistant', content: '', timestamp: new Date() }
+      setChatMessages(prev => [...prev, assistantMsg])
+      try {
+        abortRef.current = new AbortController()
+        const res = await fetch(`${BACKEND_URL}/api/chat/stream`, {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({
+            session_id: chatSessionId,
+            message: currentInput,
+            mode: 'fast',
+            feature_type: 'coding_agent',
+            tools: mcpTools.filter(t => t.active).map(t => t.id),
+          }),
+          signal: abortRef.current.signal
+        })
+        if (res.ok && res.body) {
+          const reader = res.body.getReader()
+          const decoder = new TextDecoder()
+          let fullContent = ''
+          let metadataStripped = false
+          while (true) {
+            const { done, value } = await reader.read()
+            if (done) break
+            const chunk = decoder.decode(value, { stream: true })
+            if (!metadataStripped) {
+              const cleaned = chunk.replace(/^__METADATA__:.*$/gm, '')
+              if (cleaned !== chunk) metadataStripped = true
+              fullContent += cleaned
+            } else {
+              fullContent += chunk
+            }
+            setChatMessages(prev => prev.map(m => m.id === assistantMsg.id ? { ...m, content: fullContent.trim() } : m))
+          }
+          fullContent = fullContent.trim()
+          if (!fullContent) {
+            setChatMessages(prev => prev.map(m => m.id === assistantMsg.id ? { ...m, content: 'No response from model. Make sure the Omni model is loaded.' } : m))
+          }
+        } else {
+          const errText = await res.text().catch(() => `HTTP ${res.status}`)
+          setChatMessages(prev => prev.map(m => m.id === assistantMsg.id ? { ...m, content: `Error: ${errText}` } : m))
+        }
+      } catch (err: any) {
+        if (err.name !== 'AbortError') {
+          setChatMessages(prev => prev.map(m => m.id === assistantMsg.id ? { ...m, content: `Connection error: ${err.message || 'Unknown error'}. Is the backend running?` } : m))
+        }
+      } finally {
+        setIsGenerating(false)
+      }
       return
     }
 
+    // Non-conversational: detect code request type
     setIsGenerating(true)
-
     const codeCheck = detectCodeRequest(currentInput)
-
     let contextMsg = currentInput
     if (activeTab) {
       const fileContent = workspaceFiles.flatMap(f => f.children || [f]).find(f => f.path === activeTab)?.content
@@ -872,8 +969,9 @@ export function CodingAgentPage() {
             const { done, value } = await reader.read()
             if (done) break
             fullContent += decoder.decode(value, { stream: true })
-            setChatMessages(prev => prev.map(m => m.id === assistantMsg.id ? { ...m, content: fullContent } : m))
+            setChatMessages(prev => prev.map(m => m.id === assistantMsg.id ? { ...m, content: fullContent.replace(/^__METADATA__:.*$/gm, '').trim() } : m))
           }
+          fullContent = fullContent.replace(/^__METADATA__:.*$/gm, '').trim()
 
           try {
             const jsonMatch = fullContent.match(/\{[\s\S]*\}/)
@@ -931,8 +1029,9 @@ export function CodingAgentPage() {
           const { done, value } = await reader.read()
           if (done) break
           fullContent += decoder.decode(value, { stream: true })
-          setChatMessages(prev => prev.map(m => m.id === assistantMsg.id ? { ...m, content: fullContent } : m))
+          setChatMessages(prev => prev.map(m => m.id === assistantMsg.id ? { ...m, content: fullContent.replace(/^__METADATA__:.*$/gm, '').trim() } : m))
         }
+        fullContent = fullContent.replace(/^__METADATA__:.*$/gm, '').trim()
 
         if (codeCheck.isCodeRequest && workspacePath && codeCheck.fileName) {
           const codeMatch = fullContent.match(/```(?:\w+)?\n([\s\S]*?)```/)
@@ -956,8 +1055,9 @@ export function CodingAgentPage() {
                     const { done, value } = await reader2.read()
                     if (done) break
                     explanation += decoder.decode(value, { stream: true })
-                    setChatMessages(prev => prev.map(m => m.id === explainMsg.id ? { ...m, content: explanation } : m))
+                    setChatMessages(prev => prev.map(m => m.id === explainMsg.id ? { ...m, content: explanation.replace(/^__METADATA__:.*$/gm, '').trim() } : m))
                   }
+                  explanation = explanation.replace(/^__METADATA__:.*$/gm, '').trim()
                 }
               } catch {}
             }
@@ -985,8 +1085,8 @@ export function CodingAgentPage() {
       setChatMessages(prev => prev.map(m => m.id === agentMsg.id ? { ...m, content } : m))
     }
 
-    let messages = [{ role: 'user', content: agentSettings.systemPrompt + `\n\nWorkspace: ${workspacePath}\nTask: ${task}` }]
-    let stepsLog: string[] = []
+    const messages = [{ role: 'user', content: agentSettings.systemPrompt + `\n\nWorkspace: ${workspacePath}\nTask: ${task}` }]
+    const stepsLog: string[] = []
 
     try {
       for (let i = 0; i < agentSettings.maxSteps; i++) {
@@ -1076,10 +1176,10 @@ export function CodingAgentPage() {
   const activeFileContent = activeTab ? workspaceFiles.flatMap(f => f.children || [f]).find(f => f.path === activeTab)?.content : null
 
   return (
-    <div className='w-full'>
+    <div className='w-full min-w-0'>
       {/* WELCOME PHASE - VS Code style with mandatory Open Folder */}
       {viewPhase === 'welcome' && (
-        <div className='min-h-screen bg-aurora-base flex flex-col items-center justify-center p-6 relative overflow-hidden'>
+        <div className='relative flex min-h-[calc(100dvh-4rem)] flex-col items-center justify-center overflow-x-hidden overflow-y-auto bg-aurora-base p-4 sm:p-6'>
           <div className='absolute inset-0 bg-neural-grid opacity-20' />
           <div className='absolute top-1/2 left-1/2 -translate-x-1/2 -translate-y-1/2 w-[600px] h-[600px] bg-qwen-violet/5 rounded-full blur-[100px]' />
           
@@ -1167,55 +1267,191 @@ export function CodingAgentPage() {
 
       {/* SELECT PHASE - Model Selection */}
       {viewPhase === 'select' && (
-        <div className='relative min-h-screen bg-aurora-base flex flex-col items-center justify-center p-6 overflow-hidden'>
-          <div className='absolute inset-0 bg-neural-grid opacity-20' />
+        <div className='relative flex min-h-[calc(100dvh-4rem)] items-center justify-center overflow-x-hidden overflow-y-auto bg-aurora-base p-4 sm:p-6'>
+          <div className='absolute inset-0 bg-neural-grid opacity-30' />
+          <div className='absolute top-1/2 left-1/2 -translate-x-1/2 -translate-y-1/2 w-[800px] h-[800px] bg-qwen-violet/5 rounded-full blur-[120px]' />
+
           <div className='relative z-10 w-full max-w-2xl'>
-            <motion.div initial={{ opacity: 0, y: 20 }} animate={{ opacity: 1, y: 0 }} className='text-center mb-8'>
+            <div className='text-center mb-10'>
               <button onClick={() => navigate('/dashboard')} className='absolute top-0 left-0 text-xs text-text-muted hover:text-text-secondary border border-aurora-border/40 px-3 py-1.5 rounded-lg hover:bg-aurora-surface-hover transition-colors'>
                 ← Back
               </button>
-              <div className='w-20 h-20 rounded-2xl bg-gradient-to-br from-qwen-violet/20 to-edge-cyan/20 flex items-center justify-center mx-auto mb-4 border border-qwen-violet/20'>
+              <div className='w-20 h-20 rounded-2xl bg-gradient-to-br from-qwen-violet/20 to-emerald-500/20 flex items-center justify-center mx-auto mb-5 border border-qwen-violet/20'>
                 <Code2 className='w-10 h-10 text-qwen-violet' />
               </div>
               <h1 className='text-3xl font-bold text-text-primary mb-2'>Qwen Coder Agent</h1>
-              <p className='text-text-secondary text-sm'>Select a model to get started</p>
-            </motion.div>
+              <p className='text-text-secondary'>Load the engine to start building with AI-powered code intelligence</p>
+            </div>
 
-            <motion.div initial={{ opacity: 0, y: 20 }} animate={{ opacity: 1, y: 0 }} transition={{ delay: 0.2 }} className='space-y-3'>
-              <div onClick={() => { setSelectedModel({ id: CODER_MODEL_ID, name: 'Qwen2.5-Coder-1.5B', family: 'Qwen2.5-Coder', featureType: 'coding_agent', parameterSize: '1.5B', recommendedDevice: 'CPU', recommendedRamGb: 8, status: 'ready', state: 'ready', license: 'Apache-2.0', sourceUrl: '', precisionOptions: ['INT4'], openvinoStatus: 'ready', benchmarkStatus: 'not-run', npuStatus: 'supported', localOpenVinoPath: '', packageType: 'openvino' }); setViewPhase('loading') }} className='glass-card p-4 rounded-xl border border-aurora-border/30 hover:border-qwen-violet/50 cursor-pointer transition-all hover:bg-aurora-surface-hover group'>
-                <div className='flex items-center gap-4'>
-                  <div className='w-12 h-12 rounded-xl bg-gradient-to-br from-qwen-violet/20 to-edge-cyan/20 flex items-center justify-center border border-qwen-violet/20 group-hover:border-qwen-violet/40 transition-colors'>
-                    <Code2 className='w-6 h-6 text-qwen-violet' />
-                  </div>
-                  <div className='flex-1'>
-                    <h3 className='text-sm font-semibold text-text-primary'>Qwen2.5-Coder-1.5B</h3>
-                    <p className='text-[10px] text-text-muted'>INT4 OpenVINO • CPU Optimized • 1.5B Parameters</p>
-                  </div>
-                  <div className='text-right'>
-                    <span className='text-[9px] px-2 py-0.5 rounded bg-emerald-500/10 text-emerald-400 border border-emerald-500/20'>Ready</span>
+            <div className='glass-card p-6 mb-6 border border-aurora-border/40'>
+              <div className='flex items-start gap-4'>
+                <div className='p-3 rounded-xl bg-qwen-violet/10 shrink-0'>
+                  <Code2 className='w-6 h-6 text-qwen-violet' />
+                </div>
+                <div className='flex-1 min-w-0'>
+                  <h3 className='font-bold text-text-primary text-lg'>Integrated Qwen Coder Engine</h3>
+                  <p className='text-xs text-text-muted mt-0.5'>Optimized for Intel Core Ultra — fast, local code generation</p>
+                  <div className='mt-4 space-y-2 text-sm text-text-secondary'>
+                    <div className='flex items-start gap-2'>
+                      <span className='w-1.5 h-1.5 rounded-full bg-qwen-violet mt-1.5 shrink-0' />
+                      <div>
+                        <strong className='text-text-primary'>Coder Engine (Qwen2.5-Coder):</strong>{'>'} Autonomous code generation, debugging, refactoring, and project scaffolding.
+                      </div>
+                    </div>
                   </div>
                 </div>
               </div>
-
-              <div className='glass-card p-4 rounded-xl border border-aurora-border/30 opacity-50 cursor-not-allowed'>
-                <div className='flex items-center gap-4'>
-                  <div className='w-12 h-12 rounded-xl bg-aurora-surface/50 flex items-center justify-center border border-aurora-border/20'>
-                    <Code2 className='w-6 h-6 text-text-muted' />
-                  </div>
-                  <div className='flex-1'>
-                    <h3 className='text-sm font-semibold text-text-secondary'>More models coming soon</h3>
-                    <p className='text-[10px] text-text-muted'>Additional coding models will be available in future updates</p>
-                  </div>
+              <div className='grid grid-cols-2 sm:grid-cols-4 gap-4 mt-6 pt-4 border-t border-aurora-border/30'>
+                <div className='flex items-center gap-2 text-xs text-text-secondary'>
+                  <Cpu className='w-3.5 h-3.5 text-qwen-violet shrink-0' />
+                  <span>Target: CPU / GPU</span>
+                </div>
+                <div className='flex items-center gap-2 text-xs text-text-secondary'>
+                  <HardDrive className='w-3.5 h-3.5 text-edge-cyan shrink-0' />
+                  <span>Footprint: ~3 GB</span>
+                </div>
+                <div className='flex items-center gap-2 text-xs text-text-secondary'>
+                  <Zap className='w-3.5 h-3.5 text-status-warning shrink-0' />
+                  <span>Precision: INT4</span>
+                </div>
+                <div className='flex items-center gap-2 text-xs text-text-secondary'>
+                  <MemoryStick className='w-3.5 h-3.5 text-status-ready shrink-0' />
+                  <span>OpenVINO Optimized</span>
                 </div>
               </div>
-            </motion.div>
+            </div>
+
+            {hardware && (
+              <div className='glass-card p-5 mb-6 border border-aurora-border/40'>
+                <div className='flex items-center gap-2 mb-4'>
+                  <Monitor className='w-4 h-4 text-qwen-violet' />
+                  <h3 className='text-sm font-semibold text-text-primary'>System Hardware</h3>
+                  <div className='flex items-center gap-1 ml-auto'>
+                    {hardware.openvino_status === 'available' ? (
+                      <span className='text-[10px] text-status-ready flex items-center gap-1'>
+                        <Wifi className='w-3 h-3' /> OpenVINO Ready
+                      </span>
+                    ) : (
+                      <span className='text-[10px] text-status-warning flex items-center gap-1'>
+                        <WifiOff className='w-3 h-3' /> OpenVINO Unavailable
+                      </span>
+                    )}
+                  </div>
+                </div>
+                <div className='grid grid-cols-2 sm:grid-cols-3 gap-3'>
+                  <div className='flex items-center gap-2 p-2 rounded-lg bg-aurora-surface/30'>
+                    <Cpu className='w-4 h-4 text-qwen-violet shrink-0' />
+                    <div className='min-w-0'>
+                      <p className='text-[10px] text-text-muted'>CPU</p>
+                      <p className='text-xs text-text-primary truncate'>{hardware.cpu}</p>
+                    </div>
+                  </div>
+                  <div className='flex items-center gap-2 p-2 rounded-lg bg-aurora-surface/30'>
+                    <Zap className='w-4 h-4 text-edge-cyan shrink-0' />
+                    <div className='min-w-0'>
+                      <p className='text-[10px] text-text-muted'>GPU</p>
+                      <p className='text-xs text-text-primary truncate'>{hardware.gpu}</p>
+                    </div>
+                  </div>
+                  <div className='flex items-center gap-2 p-2 rounded-lg bg-aurora-surface/30'>
+                    <Server className='w-4 h-4 text-status-warning shrink-0' />
+                    <div className='min-w-0'>
+                      <p className='text-[10px] text-text-muted'>NPU</p>
+                      <p className='text-xs text-text-primary truncate'>
+                        {hardware.npu === 'detected' ? 'Intel AI Boost (NPU)' : hardware.npu === 'not_detected' ? 'Not Detected' : hardware.npu}
+                      </p>
+                    </div>
+                  </div>
+                  <div className='flex items-center gap-2 p-2 rounded-lg bg-aurora-surface/30'>
+                    <MemoryStick className='w-4 h-4 text-status-ready shrink-0' />
+                    <div className='min-w-0'>
+                      <p className='text-[10px] text-text-muted'>RAM</p>
+                      <p className='text-xs text-text-primary'>{hardware.ram_total_gb}GB ({hardware.ram_available_gb}GB free)</p>
+                    </div>
+                  </div>
+                  <div className='flex items-center gap-2 p-2 rounded-lg bg-aurora-surface/30'>
+                    <HardDrive className='w-4 h-4 text-text-muted shrink-0' />
+                    <div className='min-w-0'>
+                      <p className='text-[10px] text-text-muted'>Storage</p>
+                      <p className='text-xs text-text-primary'>
+                        {hardware.storage_total
+                          ? `${hardware.storage_total} (${hardware.storage_free_gb}GB free)`
+                          : `${hardware.storage_free_gb}GB free`}
+                      </p>
+                    </div>
+                  </div>
+                  <div className='flex items-center gap-2 p-2 rounded-lg bg-aurora-surface/30'>
+                    <Monitor className='w-4 h-4 text-text-muted shrink-0' />
+                    <div className='min-w-0'>
+                      <p className='text-[10px] text-text-muted'>OS</p>
+                      <p className='text-xs text-text-primary truncate'>{hardware.os}</p>
+                    </div>
+                  </div>
+                </div>
+                {hardware.supported_devices?.length > 0 && (
+                  <div className='flex items-center gap-2 mt-3 pt-3 border-t border-aurora-border/20'>
+                    <span className='text-[10px] text-text-muted'>Supported Devices:</span>
+                    {hardware.supported_devices.map((dev: string) => (
+                      <span key={dev} className={`text-[10px] px-2 py-0.5 rounded-full border ${
+                        dev === 'NPU'
+                          ? 'border-status-warning/30 text-status-warning bg-status-warning/5'
+                          : dev === 'GPU'
+                          ? 'border-edge-cyan/30 text-edge-cyan bg-edge-cyan/5'
+                          : 'border-qwen-violet/30 text-qwen-violet bg-qwen-violet/5'
+                      }`}>
+                        {dev}
+                      </span>
+                    ))}
+                  </div>
+                )}
+              </div>
+            )}
+
+            <div className='flex flex-col gap-3'>
+              <Button
+                variant='primary'
+                size='lg'
+                fullWidth
+                onClick={() => {
+                  setSelectedModel({
+                    id: CODER_MODEL_ID,
+                    name: 'Qwen2.5-Coder-1.5B',
+                    family: 'Qwen2.5-Coder',
+                    featureType: 'coding_agent',
+                    parameterSize: '1.5B',
+                    recommendedDevice: 'CPU',
+                    recommendedRamGb: 8,
+                    status: 'ready',
+                    state: 'ready',
+                    license: 'Apache-2.0',
+                    sourceUrl: '',
+                    precisionOptions: ['INT4'],
+                    openvinoStatus: 'ready',
+                    benchmarkStatus: 'not-run',
+                    npuStatus: 'supported',
+                    localOpenVinoPath: '',
+                    packageType: 'openvino',
+                  })
+                  setViewPhase('loading')
+                }}
+                className='py-4 text-base font-bold bg-qwen-violet hover:bg-qwen-violet/90 text-white'
+              >
+                <Zap className='w-5 h-5 mr-2' />
+                Load Engine
+                <ArrowRight className='w-5 h-5 ml-2' />
+              </Button>
+              <div className='flex items-center justify-center gap-1.5 text-[10px] text-text-muted'>
+                <ShieldCheck className='w-3 h-3 text-emerald-400' />
+                Internet-enhanced capability enabled for deep retrieval and online tools
+              </div>
+            </div>
           </div>
         </div>
       )}
 
       {/* LOADING PHASE */}
       {viewPhase === 'loading' && (
-        <div className='relative min-h-screen bg-aurora-base text-text-primary flex flex-col items-center justify-center p-6 overflow-hidden'>
+        <div className='relative flex min-h-[calc(100dvh-4rem)] flex-col items-center justify-center overflow-x-hidden overflow-y-auto bg-aurora-base p-4 text-text-primary sm:p-6'>
           <div className='absolute inset-0 z-0 opacity-20'><canvas ref={matrixCanvasRef} className='w-full h-full' /></div>
           <div className='glass-panel max-w-4xl w-full p-8 flex flex-col gap-6 relative z-10 border-qwen-violet/30 bg-aurora-surface/80'>
             <header className='flex justify-between items-center border-b border-aurora-border/60 pb-3'>
@@ -1271,17 +1507,35 @@ export function CodingAgentPage() {
 
       {/* READY PHASE - VS Code Layout */}
       {viewPhase === 'ready' && (
-        <div className='h-screen flex flex-col bg-aurora-base'>
+        <div className='flex h-[calc(100dvh-4rem)] min-h-0 w-full max-w-full flex-col overflow-hidden bg-aurora-base'>
           {/* Title Bar */}
-          <div className='flex-shrink-0 h-9 flex items-center px-3 border-b border-aurora-border/30 bg-aurora-surface/30 gap-3'>
-            <div className='flex items-center gap-2'>
+          <div className='flex h-9 min-w-0 flex-shrink-0 items-center gap-2 overflow-hidden border-b border-aurora-border/30 bg-aurora-surface/30 px-2 sm:gap-3 sm:px-3'>
+            <div className='flex min-w-0 items-center gap-2'>
               <Code2 className='w-4 h-4 text-qwen-violet' />
-              <span className='text-[11px] font-bold text-text-primary'>Qwen Coder Agent</span>
+              <span className='truncate text-[11px] font-bold text-text-primary'>Qwen Coder Agent</span>
             </div>
             <div className='flex-1' />
-            <div className='flex items-center gap-2'>
+            <div className='flex shrink-0 items-center gap-1 sm:gap-2'>
+              <button
+                onClick={toggleExplorerPanel}
+                aria-pressed={!explorerCollapsed}
+                className={`flex h-7 items-center gap-1 rounded px-1.5 text-[9px] font-semibold transition-colors sm:px-2 ${!explorerCollapsed ? 'bg-qwen-violet/15 text-qwen-violet' : 'text-text-muted hover:bg-aurora-surface-hover hover:text-text-primary'}`}
+                title={explorerCollapsed ? 'Show Explorer' : 'Hide Explorer'}
+              >
+                <FolderOpen className='h-3.5 w-3.5' />
+                <span className='hidden lg:inline'>Explorer</span>
+              </button>
+              <button
+                onClick={toggleChatPanel}
+                aria-pressed={!chatCollapsed}
+                className={`flex h-7 items-center gap-1 rounded px-1.5 text-[9px] font-semibold transition-colors sm:px-2 ${!chatCollapsed ? 'bg-qwen-violet/15 text-qwen-violet' : 'text-text-muted hover:bg-aurora-surface-hover hover:text-text-primary'}`}
+                title={chatCollapsed ? 'Show Qwen Chat' : 'Hide Qwen Chat'}
+              >
+                <MessageSquare className='h-3.5 w-3.5' />
+                <span className='hidden lg:inline'>Chat</span>
+              </button>
               {selectedModel && (
-                <div className='flex items-center gap-1.5 px-2 py-0.5 rounded bg-qwen-violet/10 border border-qwen-violet/30'>
+                <div className='hidden items-center gap-1.5 rounded border border-qwen-violet/30 bg-qwen-violet/10 px-2 py-0.5 sm:flex'>
                   <div className='w-1.5 h-1.5 rounded-full bg-qwen-violet animate-pulse' />
                   <span className='text-[9px] text-qwen-violet font-semibold'>{selectedModel.name} ({activeDevice})</span>
                 </div>
@@ -1293,9 +1547,13 @@ export function CodingAgentPage() {
           </div>
 
           {/* Main Content - Resizable Panels */}
-          <div ref={containerRef} className='flex-1 flex overflow-hidden min-h-0'>
+          <div ref={containerRef} className='flex min-h-0 min-w-0 flex-1 overflow-hidden'>
             {/* Left - Explorer */}
-            <div style={{ width: explorerWidth }} className='flex flex-col border-r border-aurora-border/30 bg-aurora-surface/20 shrink-0 overflow-hidden'>
+            <div
+              style={{ width: explorerCollapsed ? 0 : explorerWidth, maxWidth: explorerCollapsed ? 0 : '28vw' }}
+              className={`flex shrink-0 flex-col overflow-hidden bg-aurora-surface/20 transition-[width] duration-200 ${explorerCollapsed ? 'invisible min-w-0 border-r-0' : 'visible min-w-[10rem] border-r border-aurora-border/30'}`}
+              aria-hidden={explorerCollapsed}
+            >
               <div className='px-3 py-2 border-b border-aurora-border/30 flex items-center justify-between'>
                 <span className='text-[10px] font-bold text-text-muted uppercase tracking-wider'>Explorer</span>
                 <div className='flex items-center gap-1'>
@@ -1335,9 +1593,9 @@ export function CodingAgentPage() {
                 <div className='p-1.5 space-y-0.5'>
                   {[
                     { icon: Bot, label: 'Agent', color: 'text-edge-cyan', onClick: () => setShowAgent(true) },
-                    { icon: Terminal, label: 'Scheduler', color: 'text-edge-cyan' },
-                    { icon: Server, label: 'MCP Server', color: 'text-emerald-400' },
-                    { icon: Zap, label: 'Hooks', color: 'text-status-warning' },
+                    { icon: Terminal, label: 'Scheduler', color: 'text-edge-cyan', onClick: () => setShowScheduler(true) },
+                    { icon: Server, label: 'MCP Server', color: 'text-emerald-400', onClick: () => setShowMCPServer(true) },
+                    { icon: Zap, label: 'Hooks', color: 'text-status-warning', onClick: () => setShowHooks(true) },
                     { icon: Swords, label: 'Coder Arena', color: 'text-qwen-violet', onClick: () => setShowCoderArena(true) },
                   ].map(({ icon: Icon, label, color, onClick }) => (
                     <button key={label} onClick={onClick} className='w-full flex items-center gap-2 px-2.5 py-1.5 rounded text-[10px] text-text-secondary hover:bg-aurora-surface-hover hover:text-text-primary transition-colors group'>
@@ -1348,10 +1606,10 @@ export function CodingAgentPage() {
                 </div>
               </div>
             </div>
-            <div className='w-[3px] shrink-0 cursor-col-resize hover:bg-qwen-violet/40 active:bg-qwen-violet/60 transition-colors' onMouseDown={handleDragStart('explorer')} />
+            <div className={`${explorerCollapsed ? 'hidden' : 'block'} w-[3px] shrink-0 cursor-col-resize transition-colors hover:bg-qwen-violet/40 active:bg-qwen-violet/60`} onMouseDown={handleDragStart('explorer')} />
 
             {/* Center - Code Editor + Terminal */}
-            <div className='flex-1 flex flex-col min-w-0 overflow-hidden'>
+            <div className='flex min-w-0 flex-1 flex-col overflow-hidden'>
               {/* Tabs */}
               <div className='flex-shrink-0 flex items-center border-b border-aurora-border/30 bg-aurora-base/60 overflow-x-auto h-8'>
                 {openTabs.length > 0 ? (
@@ -1385,42 +1643,30 @@ export function CodingAgentPage() {
                 {activeTab && activeFileContent !== null ? (
                   <>
                     {/* Editor Toolbar */}
-                    <div className='flex-shrink-0 flex items-center gap-1 px-2 py-1 border-b border-aurora-border/20 bg-aurora-surface/10'>
-                      <button onClick={() => { navigator.clipboard.writeText(editorContent || activeFileContent || '') }} className='flex items-center gap-1 px-2 py-0.5 rounded text-[9px] text-text-muted hover:text-text-primary hover:bg-aurora-surface-hover transition-colors' title='Copy All'>
+                    <div className='flex-shrink-0 flex items-center gap-1 px-2 py-1 border-b border-[#333] bg-[#1e1e1e]'>
+                      <button onClick={() => { navigator.clipboard.writeText(editorContent || activeFileContent || '') }} className='flex items-center gap-1 px-2 py-0.5 rounded text-[9px] text-[#858585] hover:text-[#d4d4d4] hover:bg-[#2a2d2e] transition-colors' title='Copy All'>
                         <Copy className='w-3 h-3' /> Copy
                       </button>
-                      <button onClick={() => navigator.clipboard.readText().then(t => setEditorContent(prev => (prev ?? activeFileContent ?? '') + t))} className='flex items-center gap-1 px-2 py-0.5 rounded text-[9px] text-text-muted hover:text-text-primary hover:bg-aurora-surface-hover transition-colors' title='Paste'>
+                      <button onClick={() => navigator.clipboard.readText().then(t => setEditorContent(prev => (prev ?? activeFileContent ?? '') + t))} className='flex items-center gap-1 px-2 py-0.5 rounded text-[9px] text-[#858585] hover:text-[#d4d4d4] hover:bg-[#2a2d2e] transition-colors' title='Paste'>
                         <Upload className='w-3 h-3' /> Paste
                       </button>
-                      <button onClick={() => { setEditorContent(''); textareaRef.current?.focus() }} className='flex items-center gap-1 px-2 py-0.5 rounded text-[9px] text-status-error hover:bg-status-error/10 transition-colors' title='Delete All'>
+                      <button onClick={() => { setEditorContent(''); textareaRef.current?.focus() }} className='flex items-center gap-1 px-2 py-0.5 rounded text-[9px] text-[#f44747] hover:bg-[#f4474715] transition-colors' title='Delete All'>
                         <Trash2 className='w-3 h-3' /> Clear
                       </button>
                       <div className='flex-1' />
                       {editorContent !== null && editorContent !== activeFileContent && (
-                        <button onClick={handleSaveFile} className='flex items-center gap-1 px-2 py-0.5 rounded text-[9px] text-qwen-violet hover:bg-qwen-violet/10 transition-colors font-bold'>
+                        <button onClick={handleSaveFile} className='flex items-center gap-1 px-2 py-0.5 rounded text-[9px] text-[#569cd6] hover:bg-[#569cd615] transition-colors font-bold'>
                           <Save className='w-3 h-3' /> Save
                         </button>
                       )}
-                      <span className='text-[9px] text-text-muted/40 ml-1'>Ln 1, Col 1</span>
                     </div>
-                    {/* Editor with Line Numbers */}
-                    <div className='flex-1 min-h-0 flex overflow-hidden'>
-                      {/* Line Numbers */}
-                      <div className='flex-shrink-0 w-10 bg-aurora-surface/10 border-r border-aurora-border/20 overflow-hidden select-none pt-2'>
-                        {(editorContent ?? activeFileContent ?? '').split('\n').map((_, i) => (
-                          <div key={i} className='text-[11px] text-text-muted/30 text-right pr-2 font-mono leading-[1.4] h-[1.4em]'>{i + 1}</div>
-                        ))}
-                      </div>
-                      {/* Editable Textarea */}
-                      <div className='flex-1 min-w-0 relative'>
-                        <textarea
-                          ref={textareaRef}
-                          value={editorContent ?? activeFileContent ?? ''}
-                          onChange={(e) => setEditorContent(e.target.value)}
-                          spellCheck={false}
-                          className='absolute inset-0 w-full h-full p-2 pl-3 font-mono text-[11px] text-text-primary bg-transparent resize-none focus:outline-none leading-[1.4] whitespace-pre overflow-auto'
-                        />
-                      </div>
+                    {/* Syntax Highlighted Editor */}
+                    <div className='flex-1 min-h-0'>
+                      <CodeEditor
+                        value={editorContent ?? activeFileContent ?? ''}
+                        onChange={(val) => setEditorContent(val)}
+                        filename={activeTab.split('/').pop() || activeTab}
+                      />
                     </div>
                   </>
                 ) : (
@@ -1438,10 +1684,10 @@ export function CodingAgentPage() {
               )}
 
               {/* Terminal Panel */}
-              <div className={`${terminalCollapsed ? 'h-8' : 'flex-1'} flex flex-col bg-aurora-base/80 overflow-hidden`}>
+              <div className={`${terminalCollapsed ? 'h-8' : 'flex-1'} flex flex-col bg-[#0a0e17] overflow-hidden`}>
                 {/* Terminal Header */}
-                <div className='flex-shrink-0 flex items-center gap-2 px-3 h-8 border-b border-aurora-border/30 bg-aurora-surface/20'>
-                  <button onClick={() => setTerminalCollapsed(!terminalCollapsed)} className='flex items-center gap-1.5 text-[10px] font-bold text-text-muted hover:text-text-primary transition-colors'>
+                <div className='flex-shrink-0 flex items-center gap-2 px-3 h-8 border-b border-[#333] bg-[#1e1e1e]'>
+                  <button onClick={() => setTerminalCollapsed(!terminalCollapsed)} className='flex items-center gap-1.5 text-[10px] font-bold text-[#858585] hover:text-[#d4d4d4] transition-colors'>
                     <Terminal className='w-3.5 h-3.5' />
                     TERMINAL
                     <ChevronDown className={`w-3 h-3 transition-transform ${terminalCollapsed ? '-rotate-90' : ''}`} />
@@ -1449,22 +1695,22 @@ export function CodingAgentPage() {
                   {!terminalCollapsed && (
                     <div className='flex items-center gap-1.5 ml-2'>
                       {(['PROBLEMS', 'OUTPUT', 'TERMINAL'] as const).map(tab => (
-                        <button key={tab} onClick={() => setActiveTerminalTab(tab)} className={`px-2 py-0.5 rounded text-[9px] font-bold transition-colors ${activeTerminalTab === tab ? 'text-text-primary bg-aurora-surface/40' : 'text-text-muted hover:text-text-secondary'}`}>
+                        <button key={tab} onClick={() => setActiveTerminalTab(tab)} className={`px-2 py-0.5 rounded text-[9px] font-bold transition-colors ${activeTerminalTab === tab ? 'text-[#d4d4d4] bg-[#2a2d2e]' : 'text-[#858585] hover:text-[#d4d4d4]'}`}>
                           {tab}
-                          {tab === 'PROBLEMS' && problems.length > 0 && <span className='ml-1 text-status-error'>({problems.length})</span>}
+                          {tab === 'PROBLEMS' && problems.length > 0 && <span className='ml-1 text-[#f44747]'>({problems.length})</span>}
                         </button>
                       ))}
                     </div>
                   )}
                   {activeTab && !terminalCollapsed && (
                     <div className='flex items-center gap-1 ml-auto'>
-                      <span className='text-[9px] text-text-muted font-mono px-1.5 py-0.5 rounded bg-aurora-base/60 border border-aurora-border/30'>
+                      <span className='text-[9px] text-[#858585] font-mono px-1.5 py-0.5 rounded bg-[#0a0e17] border border-[#333]'>
                         {detectLanguage(activeTab)}
                       </span>
-                      <button onClick={handleRun} disabled={isRunning || !activeFileContent} className='flex items-center gap-1 px-2 py-0.5 rounded text-[9px] font-bold bg-emerald-500/10 text-emerald-400 hover:bg-emerald-500/20 disabled:opacity-30 transition-colors'>
+                      <button onClick={handleRun} disabled={isRunning || !activeFileContent} className='flex items-center gap-1 px-2 py-0.5 rounded text-[9px] font-bold bg-[#4ec9b015] text-[#4ec9b0] hover:bg-[#4ec9b025] disabled:opacity-30 transition-colors'>
                         {isRunning ? <Loader2 className='w-2.5 h-2.5 animate-spin' /> : <Play className='w-2.5 h-2.5' />}
                       </button>
-                      <button onClick={() => { setTerminalOutput([]); setProblems([]); setOutputLogs([]); setTerminalHistory([]) }} className='px-1.5 py-0.5 rounded text-[9px] text-text-muted hover:text-text-secondary hover:bg-aurora-surface-hover transition-colors'>
+                      <button onClick={() => { setTerminalOutput([]); setProblems([]); setOutputLogs([]); setTerminalHistory([]) }} className='px-1.5 py-0.5 rounded text-[9px] text-[#858585] hover:text-[#d4d4d4] hover:bg-[#2a2d2e] transition-colors'>
                         Clear
                       </button>
                     </div>
@@ -1478,17 +1724,17 @@ export function CodingAgentPage() {
                     {activeTerminalTab === 'PROBLEMS' && (
                       <div className='h-full overflow-y-auto p-2'>
                         {problems.length === 0 ? (
-                          <div className='flex items-center gap-2 text-[10px] text-text-muted/40 p-2'>
+                          <div className='flex items-center gap-2 text-[10px] text-[#858585]/60 p-2'>
                             <CheckCircle2 className='w-3.5 h-3.5' />
                             <span>No problems detected</span>
                           </div>
                         ) : (
                           <div className='space-y-0.5'>
                             {problems.map((p, i) => (
-                              <div key={i} className={`flex items-center gap-2 px-2 py-1 rounded text-[10px] ${p.type === 'error' ? 'text-status-error bg-status-error/5' : p.type === 'warning' ? 'text-status-warning bg-status-warning/5' : 'text-edge-cyan bg-edge-cyan/5'}`}>
+                              <div key={i} className={`flex items-center gap-2 px-2 py-1 rounded text-[10px] ${p.type === 'error' ? 'text-[#f44747] bg-[#f4474710]' : p.type === 'warning' ? 'text-[#cca700] bg-[#cca70010]' : 'text-[#4ec9b0] bg-[#4ec9b010]'}`}>
                                 {p.type === 'error' ? <AlertCircle className='w-3 h-3 shrink-0' /> : <CheckCircle2 className='w-3 h-3 shrink-0' />}
                                 <span className='flex-1 truncate'>{p.message}</span>
-                                {p.file && <span className='text-text-muted shrink-0'>{p.file}:{p.line}</span>}
+                                {p.file && <span className='text-[#858585] shrink-0'>{p.file}:{p.line}</span>}
                               </div>
                             ))}
                           </div>
@@ -1500,9 +1746,9 @@ export function CodingAgentPage() {
                     {activeTerminalTab === 'OUTPUT' && (
                       <div className='h-full overflow-y-auto p-3 font-mono text-[10px] leading-relaxed'>
                         {outputLogs.length === 0 ? (
-                          <div className='text-text-muted/40'>No output</div>
+                          <div className='text-[#858585]/60'>No output</div>
                         ) : (
-                          outputLogs.map((log, i) => <div key={i} className='text-text-secondary whitespace-pre-wrap'>{log}</div>)
+                          outputLogs.map((log, i) => <div key={i} className='text-[#d4d4d4] whitespace-pre-wrap'>{log}</div>)
                         )}
                       </div>
                     )}
@@ -1512,22 +1758,22 @@ export function CodingAgentPage() {
                       <div className='h-full flex flex-col'>
                         <div className='flex-1 min-h-0 overflow-y-auto p-3 font-mono text-[11px] leading-relaxed scrollbar-hide'>
                           {terminalOutput.length === 0 && terminalHistory.length === 0 ? (
-                            <div className='flex flex-col gap-1 text-text-muted/40'>
+                            <div className='flex flex-col gap-1 text-[#858585]/60'>
                               <span>Microsoft Windows [Version 10.0.26100.4351]</span>
                               <span>(c) Microsoft Corporation. All rights reserved.</span>
                             </div>
                           ) : (
                             <>
                               {terminalHistory.map((cmd, i) => (
-                                <div key={`h-${i}`} className='text-text-secondary'>
-                                  <span className='text-emerald-400/80'>C:\&gt;</span> {cmd}
+                                <div key={`h-${i}`} className='text-[#d4d4d4]'>
+                                  <span className='text-[#4ec9b0]'>C:\&gt;</span> {cmd}
                                 </div>
                               ))}
                               {terminalOutput.map((line, idx) => (
                                 <div key={idx} className={`whitespace-pre-wrap break-all ${
-                                  line.type === 'stderr' ? 'text-status-error' : 
-                                  line.type === 'info' ? 'text-text-muted' : 
-                                  'text-emerald-400'
+                                  line.type === 'stderr' ? 'text-[#f44747]' :
+                                  line.type === 'info' ? 'text-[#858585]' :
+                                  'text-[#4ec9b0]'
                                 }`}>
                                   {line.text}
                                 </div>
@@ -1537,24 +1783,24 @@ export function CodingAgentPage() {
                           )}
                         </div>
                         {/* Terminal Input */}
-                        <div className='flex-shrink-0 flex items-center gap-2 px-3 py-1.5 border-t border-aurora-border/30'>
-                          <span className='text-[10px] text-emerald-400/80 font-mono shrink-0'>C:\&gt;</span>
+                        <div className='flex-shrink-0 flex items-center gap-2 px-3 py-1.5 border-t border-[#333]'>
+                          <span className='text-[10px] text-[#4ec9b0] font-mono shrink-0'>C:\&gt;</span>
                           <input
                             type='text'
                             value={terminalInput}
                             onChange={(e) => setTerminalInput(e.target.value)}
                             onKeyDown={(e) => { if (e.key === 'Enter' && terminalInput.trim()) { handleTerminalSubmit() } }}
                             placeholder={activeTab ? `${detectLanguage(activeTab)} — type a command` : 'Open a file to run'}
-                            className='flex-1 bg-transparent text-[10px] text-text-primary font-mono focus:outline-none placeholder:text-text-muted/30'
+                            className='flex-1 bg-transparent text-[10px] text-[#d4d4d4] font-mono focus:outline-none placeholder:text-[#858585]/40'
                           />
                           <div className='flex items-center gap-1'>
-                            <button onClick={() => navigator.clipboard.readText().then(t => setTerminalInput(t))} className='p-0.5 rounded hover:bg-aurora-surface-hover text-text-muted/40 hover:text-text-muted transition-colors' title='Paste'>
+                            <button onClick={() => navigator.clipboard.readText().then(t => setTerminalInput(t))} className='p-0.5 rounded hover:bg-[#2a2d2e] text-[#858585]/50 hover:text-[#858585] transition-colors' title='Paste'>
                               <Upload className='w-3 h-3' />
                             </button>
-                            <button onClick={() => { navigator.clipboard.writeText(terminalOutput.map(l => l.text).join('\n')) }} className='p-0.5 rounded hover:bg-aurora-surface-hover text-text-muted/40 hover:text-text-muted transition-colors' title='Copy Output'>
+                            <button onClick={() => { navigator.clipboard.writeText(terminalOutput.map(l => l.text).join('\n')) }} className='p-0.5 rounded hover:bg-[#2a2d2e] text-[#858585]/50 hover:text-[#858585] transition-colors' title='Copy Output'>
                               <Copy className='w-3 h-3' />
                             </button>
-                            <button onClick={() => { setTerminalOutput([]); setTerminalHistory([]) }} className='p-0.5 rounded hover:bg-aurora-surface-hover text-text-muted/40 hover:text-text-muted transition-colors' title='Clear'>
+                            <button onClick={() => { setTerminalOutput([]); setTerminalHistory([]) }} className='p-0.5 rounded hover:bg-[#2a2d2e] text-[#858585]/50 hover:text-[#858585] transition-colors' title='Clear'>
                               <Trash2 className='w-3 h-3' />
                             </button>
                           </div>
@@ -1584,15 +1830,51 @@ export function CodingAgentPage() {
             </div>
 
             {/* Chat Resize Handle */}
-            <div className='w-[3px] shrink-0 cursor-col-resize hover:bg-qwen-violet/40 active:bg-qwen-violet/60 transition-colors' onMouseDown={handleDragStart('chat')} />
+            <div className={`${chatCollapsed ? 'hidden' : 'block'} w-[3px] shrink-0 cursor-col-resize transition-colors hover:bg-qwen-violet/40 active:bg-qwen-violet/60`} onMouseDown={handleDragStart('chat')} />
 
             {/* Right - Qwen Coder Chat */}
-            <div style={{ width: chatWidth }} className='flex flex-col border-l border-aurora-border/30 bg-aurora-surface/10 shrink-0 overflow-hidden'>
+            <div
+              style={{ width: chatCollapsed ? 0 : chatWidth, maxWidth: chatCollapsed ? 0 : '40vw' }}
+              className={`flex shrink-0 flex-col overflow-hidden bg-aurora-surface/10 transition-[width] duration-200 ${chatCollapsed ? 'invisible min-w-0 border-l-0' : 'visible min-w-[12rem] border-l border-aurora-border/30 sm:min-w-[15rem]'}`}
+              aria-hidden={chatCollapsed}
+            >
               <div className='px-3 py-2 border-b border-aurora-border/30 flex items-center gap-2'>
                 <MessageSquare className='w-4 h-4 text-qwen-violet' />
                 <span className='text-[11px] font-bold text-text-primary'>Qwen Coder</span>
+                <button
+                  onClick={() => setShowHistory(!showHistory)}
+                  className='ml-1 p-1 rounded hover:bg-aurora-surface-hover text-text-muted hover:text-text-primary transition-colors'
+                  title='Chat History'
+                >
+                  <svg className='w-3.5 h-3.5' viewBox='0 0 24 24' fill='none' stroke='currentColor' strokeWidth='2' strokeLinecap='round' strokeLinejoin='round'>
+                    <circle cx='12' cy='12' r='10' />
+                    <polyline points='12 6 12 12 16 14' />
+                  </svg>
+                </button>
                 {selectedModel && <span className='ml-auto text-[9px] px-1.5 py-0.5 rounded bg-emerald-500/10 text-emerald-400 border border-emerald-500/20'>Online</span>}
               </div>
+              {/* Chat History Panel */}
+              {showHistory ? (
+                <ChatHistoryPanel
+                  backendUrl={BACKEND_URL}
+                  onLoadSession={(sessionId) => {
+                    // Load session messages into chat
+                    fetch(`${BACKEND_URL}/api/chat/sessions/${sessionId}/messages`)
+                      .then(r => r.json())
+                      .then((msgs: Array<{ id: string; role: string; content: string; created_at: string }>) => {
+                        setChatMessages(msgs.map(m => ({
+                          id: m.id,
+                          role: m.role as 'user' | 'assistant',
+                          content: m.content,
+                          timestamp: new Date(m.created_at),
+                        })))
+                        setShowHistory(false)
+                      })
+                  }}
+                  onNewChat={() => setChatMessages([])}
+                  onClose={() => setShowHistory(false)}
+                />
+              ) : (
               <div className='flex-1 min-h-0 overflow-y-auto p-3 space-y-3'>
                 {chatMessages.length === 0 ? (
                   <div className='flex flex-col items-center justify-center h-full text-center'>
@@ -1657,6 +1939,7 @@ export function CodingAgentPage() {
                   </>
                 )}
               </div>
+              )}
               <div className='p-3 border-t border-aurora-border/30'>
                 <div className='flex items-end gap-2'>
                   <textarea
@@ -1664,7 +1947,7 @@ export function CodingAgentPage() {
                     value={chatInput}
                     onChange={(e) => setChatInput(e.target.value)}
                     onKeyDown={(e) => { if (e.key === 'Enter' && !e.shiftKey) { e.preventDefault(); handleChatSend() } }}
-                    placeholder={agentMode ? 'Describe task for agent...' : 'Ask Qwen Coder...'}
+                    placeholder='Ask Qwen Coder...'
                     className='flex-1 min-h-[36px] max-h-[100px] px-3 py-2 rounded-lg bg-aurora-base border border-aurora-border/50 text-xs text-text-primary resize-none focus:outline-none focus:border-qwen-violet placeholder:text-text-muted/50'
                     rows={1}
                   />
@@ -1674,36 +1957,20 @@ export function CodingAgentPage() {
                 </div>
                 <div className='flex items-center gap-2 mt-1.5 text-[9px] text-text-muted'>
                   <span>{activeTab ? `File: ${activeTab.split('/').pop()}` : 'No file selected'}</span>
-                  <div className='flex-1' />
-                  {workspacePath && (
-                    <button
-                      onClick={() => setAgentMode(!agentMode)}
-                      className={`flex items-center gap-1 px-2 py-0.5 rounded border transition-colors ${agentMode ? 'bg-edge-cyan/20 border-edge-cyan/40 text-edge-cyan' : 'border-aurora-border/30 hover:border-aurora-border/50 text-text-muted hover:text-text-secondary'}`}
-                      title={agentMode ? 'Agent mode ON' : 'Agent mode OFF'}
-                    >
-                      <Bot className='w-2.5 h-2.5' />
-                      {agentMode ? 'Agent ON' : 'Agent'}
-                    </button>
-                  )}
-                  {agentMode && (
-                    <button onClick={() => setShowAgent(true)} className='flex items-center gap-1 px-2 py-0.5 rounded border border-aurora-border/30 hover:border-aurora-border/50 text-text-muted hover:text-text-secondary transition-colors' title='Agent Settings'>
-                      <Settings className='w-2.5 h-2.5' />
-                    </button>
-                  )}
                 </div>
               </div>
             </div>
           </div>
 
           {/* Status Bar */}
-          <div className='flex-shrink-0 h-6 flex items-center px-3 border-t border-aurora-border/30 bg-aurora-surface/30 text-[9px] text-text-muted gap-4'>
-            <span className='flex items-center gap-1'><Code2 className='w-3 h-3' /> Qwen Coder</span>
-            {workspacePath && <span className='flex items-center gap-1'><Folder className='w-3 h-3' /> {workspacePath.split('/').pop() || workspacePath.split('\\').pop()}</span>}
-            {activeTab && <span>{activeTab.split('/').pop()}</span>}
+          <div className='flex h-6 min-w-0 flex-shrink-0 items-center gap-2 overflow-hidden border-t border-aurora-border/30 bg-aurora-surface/30 px-2 text-[9px] text-text-muted sm:gap-4 sm:px-3'>
+            <span className='flex shrink-0 items-center gap-1'><Code2 className='w-3 h-3' /> Qwen Coder</span>
+            {workspacePath && <span className='hidden min-w-0 items-center gap-1 sm:flex'><Folder className='w-3 h-3 shrink-0' /><span className='truncate'>{workspacePath.split('/').pop() || workspacePath.split('\\').pop()}</span></span>}
+            {activeTab && <span className='hidden truncate md:inline'>{activeTab.split('/').pop()}</span>}
             <div className='flex-1' />
-            {activeTab && <span>Ln 1, Col 1</span>}
-            <span>UTF-8</span>
-            <span className='text-qwen-violet'>Qwen2.5-Coder-1.5B</span>
+            {activeTab && <span className='hidden shrink-0 lg:inline'>Ln 1, Col 1</span>}
+            <span className='hidden shrink-0 sm:inline'>UTF-8</span>
+            <span className='shrink-0 text-qwen-violet'>Qwen2.5-Coder-1.5B</span>
           </div>
         </div>
       )}
@@ -1745,6 +2012,9 @@ export function CodingAgentPage() {
 
       {showCoderArena && <CoderArenaPage onClose={() => setShowCoderArena(false)} />}
       {showAgent && <AgentPage workspacePath={workspacePath} onClose={() => setShowAgent(false)} settings={agentSettings} onSave={setAgentSettings} />}
+      {showMCPServer && <MCPServerPanel onClose={() => setShowMCPServer(false)} />}
+      {showScheduler && <SchedulerPanel onClose={() => setShowScheduler(false)} />}
+      {showHooks && <HooksPanel onClose={() => setShowHooks(false)} />}
     </div>
   )
 }

@@ -1,14 +1,14 @@
+
 from fastapi import APIRouter
 from pydantic import BaseModel
-from typing import Optional, List
 
 router = APIRouter()
 
 class InferenceRequest(BaseModel):
     model_id: str
     prompt: str
-    max_tokens: Optional[int] = 1024
-    temperature: Optional[float] = 0.7
+    max_tokens: int | None = 1024
+    temperature: float | None = 0.7
 
 class InferenceResponse(BaseModel):
     response: str

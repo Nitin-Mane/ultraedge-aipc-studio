@@ -1,41 +1,64 @@
-# Frontend Node / Build output
-node_modules/
-dist/
-dist-ssr/
-*.local
-.vite/
+# Credentials and machine-local configuration
+.env
+.env.*
+!.env.example
+*.pem
+*.key
+*.p12
+*.pfx
+*.jks
 
-# Python caching
-__pycache__/
-*.pyc
-*.pyo
-*.pyd
-.pytest_cache/
-.venv/
-env/
-venv/
-
-# App Storage Cache (Ignore heavy data & database files)
-app_data/*.db
-app_data/documents/*
-models/*
-!models/.gitkeep
-!app_data/.gitkeep
-
-# IDE Logs
+# Editors, agent state, and local repository metadata
 .idea/
 .vscode/
+.agents/
+.codex/
 *.suo
 *.ntvs*
 *.njsproj
 *.sln
 *.sw?
 
-# Databases (SQLite) & runtime caches
-*.db
-backend/app_data/
-backend/models/
-ov_cache/
+# Python environments and caches
+__pycache__/
+*.py[cod]
+.pytest_cache/
+.ruff_cache/
+.venv/
+env/
+venv/
 
-# Conda / logs
+# Frontend dependencies and build output
+node_modules/
+dist/
+dist-ssr/
+.vite/
+*.local
+
+# Runtime data, converted models, and generated caches
+models/
+backend/models/
+app_data/
+backend/app_data/
+ov_cache/
+backend/dump/
+runtime_settings.json
+*.db
+*.sqlite
+*.sqlite3
 *.log
+*.errors.txt
+kernel.errors.txt
+
+# Large model artifacts
+*.safetensors
+*.gguf
+*.onnx
+*.blob
+*.pt
+*.pth
+*.bin
+
+# Internal reports and nested publication exports
+solid_report.md
+github_repo/

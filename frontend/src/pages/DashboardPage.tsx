@@ -1,21 +1,25 @@
+import { useState, useEffect } from 'react'
 import { useNavigate } from 'react-router-dom'
 import { motion } from 'framer-motion'
 import { 
   MessageSquare, Code2, Cpu, BarChart3, 
-  Shield, Image
+  Shield, CheckCircle2, AlertTriangle, Settings
 } from 'lucide-react'
-import { useAppStore } from '../store/useAppStore'
 import { PageTransition, FadeIn, StaggerContainer, StaggerItem } from '../components/PageTransition'
+import { ACTIVE_MODEL_IDS } from '../hooks/modelCatalog'
+import { getModelsCatalog } from '../api/models'
 
+// AI Workspace cards — linked to their model IDs for readiness checking
 const aiAssistants = [
   {
     id: 'personal-assistant',
     title: 'Personal Assistant',
-    description: 'Offline AI chat with local memory and Qwen models',
+    description: 'Offline AI chat with voice, vision and local memory powered by Qwen2.5-Omni.',
     icon: MessageSquare,
     color: 'text-edge-cyan',
     bgColor: 'bg-edge-cyan/10',
     borderColor: 'border-edge-cyan/30',
+    modelId: ACTIVE_MODEL_IDS.personalAssistant,
     model: 'Qwen2.5-Omni-3B',
     device: 'GPU',
     path: '/personal-assistant',
@@ -23,12 +27,13 @@ const aiAssistants = [
   {
     id: 'coding-agent',
     title: 'Coding Agent',
-    description: 'Code generation, explanation, and debugging',
+    description: 'Local code generation, explanation, and debugging with Qwen Coder.',
     icon: Code2,
     color: 'text-qwen-violet',
     bgColor: 'bg-qwen-violet/10',
     borderColor: 'border-qwen-violet/30',
-    model: 'Qwen2.5-Coder-7B',
+    modelId: ACTIVE_MODEL_IDS.codingAgent,
+    model: 'Qwen2.5-Coder-1.5B',
     device: 'GPU',
     path: '/coding-agent',
   }
@@ -38,7 +43,7 @@ const systemTools = [
   {
     id: 'model-manager',
     title: 'Model Manager',
-    description: 'Manage, compile, and initialize local models',
+    description: 'Download, optimize, and benchmark local AI models with OpenVINO.',
     icon: Cpu,
     color: 'text-edge-blue',
     bgColor: 'bg-edge-blue/10',
@@ -48,7 +53,7 @@ const systemTools = [
   {
     id: 'benchmark-studio',
     title: 'Benchmark Studio',
-    description: 'Performance metrics and hardware speed testing',
+    description: 'Performance metrics and hardware speed testing.',
     icon: BarChart3,
     color: 'text-qwen-purple',
     bgColor: 'bg-qwen-purple/10',
@@ -58,7 +63,7 @@ const systemTools = [
   {
     id: 'security-privacy',
     title: 'Security & Privacy',
-    description: 'Local-only data shield and privacy controls',
+    description: 'Local-only data shield and privacy controls.',
     icon: Shield,
     color: 'text-status-enterprise',
     bgColor: 'bg-status-enterprise/10',
@@ -69,10 +74,31 @@ const systemTools = [
 
 export function DashboardPage() {
   const navigate = useNavigate()
+  const [modelReadiness, setModelReadiness] = useState<Record<string, boolean>>({})
+
+  // Fetch model catalog once to check readiness of the two active models
+  useEffect(() => {
+    const checkModels = async () => {
+      try {
+        const data = await getModelsCatalog()
+        const readinessMap: Record<string, boolean> = {}
+        for (const m of data.models ?? []) {
+          readinessMap[m.id] = m.state === 'ready' || m.status === 'ready'
+        }
+        setModelReadiness(readinessMap)
+      } catch {
+        // Backend might not be running; silently ignore
+      }
+    }
+    checkModels()
+    const interval = setInterval(checkModels, 8000)
+    return () => clearInterval(interval)
+  }, [])
 
   return (
     <PageTransition>
       <div className="min-h-screen bg-aurora-base">
+
         {/* Hero Section */}
         <div className="relative overflow-hidden">
           <div className="absolute inset-0 bg-neural-grid opacity-30" />
@@ -100,29 +126,73 @@ export function DashboardPage() {
           </FadeIn>
 
           <StaggerContainer delay={0.05}>
-            <div className="grid grid-cols-1 sm:grid-cols-3 gap-6">
-              {aiAssistants.map((feature) => (
-                <StaggerItem key={feature.id}>
-                  <motion.button
-                    whileHover={{ scale: 1.02, transition: { duration: 0.2 } }}
-                    whileTap={{ scale: 0.98 }}
-                    onClick={() => navigate(feature.path)}
-                    className="glass-card-hover p-6 w-full text-left group"
-                  >
-                    <div className={`p-3 rounded-xl ${feature.bgColor} w-fit mb-4 group-hover:scale-110 transition-transform`}>
-                      <feature.icon className={`w-6 h-6 ${feature.color}`} />
-                    </div>
-                    <h3 className="font-semibold text-text-primary mb-1.5 text-base">{feature.title}</h3>
-                    <p className="text-xs text-text-secondary mb-4 line-clamp-2">{feature.description}</p>
-                    <div className="flex items-center gap-2 pt-3 border-t border-aurora-border/30">
-                      <span className="text-[10px] text-text-muted">Model:</span>
-                      <span className="text-[10px] text-text-secondary">{feature.model}</span>
-                      <span className="text-[10px] text-text-muted ml-auto">Device:</span>
-                      <span className="text-[10px] text-text-secondary">{feature.device}</span>
-                    </div>
-                  </motion.button>
-                </StaggerItem>
-              ))}
+            <div className="grid grid-cols-1 sm:grid-cols-2 gap-6">
+              {aiAssistants.map((feature) => {
+                const isReady = modelReadiness[feature.modelId] === true
+                const isChecked = Object.keys(modelReadiness).length > 0
+
+                return (
+                  <StaggerItem key={feature.id}>
+                    <motion.button
+                      whileHover={{ scale: 1.02, transition: { duration: 0.2 } }}
+                      whileTap={{ scale: 0.98 }}
+                      onClick={() => navigate(feature.path)}
+                      className={`glass-card-hover p-6 w-full text-left group border ${feature.borderColor} relative overflow-hidden`}
+                    >
+                      {/* Readiness indicator stripe */}
+                      <div
+                        className={`absolute top-0 left-0 right-0 h-0.5 transition-all duration-700 ${
+                          isReady
+                            ? 'bg-gradient-to-r from-status-ready/60 to-transparent'
+                            : isChecked
+                            ? 'bg-gradient-to-r from-status-warning/40 to-transparent'
+                            : 'bg-transparent'
+                        }`}
+                      />
+
+                      <div className={`p-3 rounded-xl ${feature.bgColor} w-fit mb-4 group-hover:scale-110 transition-transform`}>
+                        <feature.icon className={`w-6 h-6 ${feature.color}`} />
+                      </div>
+
+                      <div className="flex items-start justify-between gap-3 mb-1.5">
+                        <h3 className="font-semibold text-text-primary text-base">{feature.title}</h3>
+                        {/* Model readiness badge */}
+                        {isChecked && (
+                          isReady ? (
+                            <span className="flex items-center gap-1 px-2 py-0.5 rounded-full bg-status-ready/10 border border-status-ready/30 text-status-ready text-[10px] font-semibold shrink-0">
+                              <CheckCircle2 className="w-3 h-3" /> Ready
+                            </span>
+                          ) : (
+                            <button
+                              onClick={(e) => { e.stopPropagation(); navigate('/model-manager') }}
+                              className="flex items-center gap-1 px-2 py-0.5 rounded-full bg-status-warning/10 border border-status-warning/30 text-status-warning text-[10px] font-semibold shrink-0 hover:bg-status-warning/20 transition-colors"
+                            >
+                              <Settings className="w-3 h-3" /> Setup Required
+                            </button>
+                          )
+                        )}
+                      </div>
+
+                      <p className="text-xs text-text-secondary mb-4 line-clamp-2">{feature.description}</p>
+
+                      <div className="flex items-center gap-2 pt-3 border-t border-aurora-border/30">
+                        <span className="text-[10px] text-text-muted">Model:</span>
+                        <span className="text-[10px] text-text-secondary">{feature.model}</span>
+                        <span className="text-[10px] text-text-muted ml-auto">Device:</span>
+                        <span className="text-[10px] text-text-secondary">{feature.device}</span>
+                      </div>
+
+                      {/* "Setup Required" overlay hint when not ready */}
+                      {isChecked && !isReady && (
+                        <div className="mt-3 flex items-center gap-2 text-[10px] text-status-warning/80">
+                          <AlertTriangle className="w-3 h-3" />
+                          <span>Model not installed — go to Model Manager to download</span>
+                        </div>
+                      )}
+                    </motion.button>
+                  </StaggerItem>
+                )
+              })}
             </div>
           </StaggerContainer>
         </div>

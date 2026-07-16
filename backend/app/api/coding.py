@@ -1,12 +1,8 @@
-from fastapi import APIRouter, HTTPException
+import json
+
+from fastapi import APIRouter
 from fastapi.responses import StreamingResponse
 from pydantic import BaseModel
-from typing import Optional, List, Dict, Any
-from datetime import datetime
-import json
-import os
-import threading
-import time
 
 router = APIRouter()
 
@@ -14,12 +10,12 @@ CODER_MODEL_ID = "Qwen2.5-Coder-1.5B-Instruct-ov-int4"
 
 class CodeGenerationRequest(BaseModel):
     prompt: str
-    language: Optional[str] = "python"
-    context_files: Optional[List[Dict[str, str]]] = None
-    project_path: Optional[str] = None
-    mode: Optional[str] = "generate"  # generate, explain, debug, refactor
-    temperature: Optional[float] = 0.2
-    max_tokens: Optional[int] = 2048
+    language: str | None = "python"
+    context_files: list[dict[str, str]] | None = None
+    project_path: str | None = None
+    mode: str | None = "generate"  # generate, explain, debug, refactor
+    temperature: float | None = 0.2
+    max_tokens: int | None = 2048
 
 class CodeGenerationResponse(BaseModel):
     code: str
@@ -28,12 +24,31 @@ class CodeGenerationResponse(BaseModel):
     tokens_per_second: float
 
 def _ensure_coder_loaded():
-    """Ensure the Qwen Coder model is loaded. Returns active info."""
+    """Ensure a coding-capable model is loaded. Returns active info.
+    
+    Tries the dedicated Coder model first; falls back to whatever model
+    is already loaded (e.g. the Omni model) if the Coder model is unavailable.
+    """
     from app.runtime.inference import RuntimeManager
     active_info = RuntimeManager.get_active_info()
-    if active_info.get("model_id") != CODER_MODEL_ID:
+    model_id = active_info.get("model_id")
+
+    # Already using the Coder model — nothing to do
+    if model_id == CODER_MODEL_ID:
+        return active_info
+
+    # A model is already loaded (e.g. Omni) — use it for coding tasks
+    if model_id:
+        return active_info
+
+    # No model loaded — try to load Coder; if it fails, try Omni as fallback
+    try:
         RuntimeManager.load_model(CODER_MODEL_ID, "AUTO", "INT4")
-    return RuntimeManager.get_active_info()
+        return RuntimeManager.get_active_info()
+    except Exception:
+        fallback_id = "Qwen2.5-Omni-3B"
+        RuntimeManager.load_model(fallback_id, "AUTO", "INT4")
+        return RuntimeManager.get_active_info()
 
 @router.post("/generate")
 async def generate_code_stream(req: CodeGenerationRequest):
@@ -52,12 +67,11 @@ async def generate_code_stream(req: CodeGenerationRequest):
         device = active_info.get("device", "CPU")
         yield f"__METADATA__:{json.dumps({'model_id': model_id, 'device': device, 'language': req.language})}\n"
         
-        for token in RuntimeManager.generate_stream(
+        yield from RuntimeManager.generate_stream(
             prompt=system_prompt,
             mode="fast",  # Fast mode for code generation
             effort="low"
-        ):
-            yield token
+        )
     
     return StreamingResponse(event_generator(), media_type="text/event-stream")
 
@@ -82,12 +96,11 @@ Code to analyze:
 Provide your analysis in a structured markdown format with clear sections."""
     
     def event_generator():
-        for token in RuntimeManager.generate_stream(
+        yield from RuntimeManager.generate_stream(
             prompt=prompt,
             mode="thinking",
             effort="high"
-        ):
-            yield token
+        )
     
     return StreamingResponse(event_generator(), media_type="text/event-stream")
 
@@ -112,12 +125,11 @@ Code to explain:
 Provide a clear, educational explanation."""
     
     def event_generator():
-        for token in RuntimeManager.generate_stream(
+        yield from RuntimeManager.generate_stream(
             prompt=prompt,
             mode="thinking",
             effort="high"
-        ):
-            yield token
+        )
     
     return StreamingResponse(event_generator(), media_type="text/event-stream")
 
@@ -143,12 +155,11 @@ Please:
 Be thorough but concise in your explanation."""
     
     def event_generator():
-        for token in RuntimeManager.generate_stream(
+        yield from RuntimeManager.generate_stream(
             prompt=prompt,
             mode="thinking",
             effort="high"
-        ):
-            yield token
+        )
     
     return StreamingResponse(event_generator(), media_type="text/event-stream")
 
@@ -173,12 +184,11 @@ Original code:
 Provide the refactored code with explanations of changes made."""
     
     def event_generator():
-        for token in RuntimeManager.generate_stream(
+        yield from RuntimeManager.generate_stream(
             prompt=prompt,
             mode="thinking",
             effort="high"
-        ):
-            yield token
+        )
     
     return StreamingResponse(event_generator(), media_type="text/event-stream")
 
@@ -198,12 +208,11 @@ async def code_completion(req: CodeGenerationRequest):
 Continue from where the code left off. Provide only the completion, no explanation."""
     
     def event_generator():
-        for token in RuntimeManager.generate_stream(
+        yield from RuntimeManager.generate_stream(
             prompt=prompt,
             mode="fast",
             effort="low"
-        ):
-            yield token
+        )
     
     return StreamingResponse(event_generator(), media_type="text/event-stream")
 
@@ -211,6 +220,24 @@ def _build_coding_prompt(req: CodeGenerationRequest) -> str:
     """Build a coding-specific prompt based on mode and context."""
     
     language = req.language or "python"
+    prompt_lower = req.prompt.lower().strip()
+    
+    # Detect clearly non-code conversational inputs
+    conversational_patterns = [
+        'hello', 'hi', 'hey', 'good morning', 'good evening', 'good afternoon',
+        'how are you', 'what are you', 'who are you', 'what can you do',
+        'help', 'thanks', 'thank you', 'bye', 'goodbye', 'what is',
+        'tell me about', 'explain', 'what do you', 'can you',
+    ]
+    is_conversational = (
+        len(prompt_lower.split()) <= 6
+        and any(prompt_lower.startswith(p) or prompt_lower == p for p in conversational_patterns)
+    )
+    
+    if is_conversational:
+        return f"""You are Qwen Coder, a friendly AI coding assistant running locally on an AI PC. The user is greeting you or asking a general question. Respond warmly and concisely. Introduce yourself briefly and mention you can help with coding tasks like generating, explaining, debugging, and refactoring code. Keep your response under 3 sentences.
+
+User said: {req.prompt}"""
     
     if req.mode == "explain":
         return f"""You are an expert programmer. Explain the following code in detail:

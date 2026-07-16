@@ -14,7 +14,6 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Local hardware scanner detecting CPU, Intel Arc/Integrated GPU, Intel NPU, RAM limits, and disk space.
 - Hardware-aware recommendation scoring model logic.
 - Background worker threads simulating compilation (Download → Verify → Convert → Quantize → Benchmark → Ready).
-- Private Local document ingest RAG parsing, indexing, deletion, and vector reference tracking.
 - SSE chat stream generation adapter with fallback mockup outputs.
 - Radial loader scanner animation frames on the Welcome Splash UI screen.
 - Security audit log registry table saving database access timestamps offline.

@@ -2,8 +2,7 @@
 
 import os
 import shutil
-import subprocess
-from typing import Optional
+
 from fastapi import APIRouter, HTTPException
 from pydantic import BaseModel
 
@@ -83,7 +82,7 @@ async def read_file(req: FileRequest):
     if not os.path.isfile(req.path):
         raise HTTPException(status_code=404, detail="File not found")
     try:
-        with open(req.path, "r", encoding="utf-8", errors="replace") as f:
+        with open(req.path, encoding="utf-8", errors="replace") as f:
             content = f.read()
         return {"content": content}
     except Exception as e:

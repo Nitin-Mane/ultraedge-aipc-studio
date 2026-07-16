@@ -1,441 +1,462 @@
-import { useState, useEffect } from 'react'
+import { useState, useEffect, useCallback } from 'react'
 import { useNavigate } from 'react-router-dom'
 import { motion, AnimatePresence } from 'framer-motion'
-import { 
-  Search, Filter, Download, Upload, Play, Pause, Trash2, BarChart3, 
-  Settings, ChevronDown, ChevronUp, ExternalLink, Cpu, HardDrive,
-  MemoryStick, Zap, CheckCircle2, XCircle, Clock, AlertTriangle,
-  RefreshCw, Eye, Code2, FileText, Mic, Volume2, Layers, Image,
-  MoreVertical, Info, ArrowUpDown, Grid, List, ArrowLeft
+import {
+  Download, BarChart3, Info, ArrowLeft, CheckCircle2,
+  Cpu, HardDrive, Zap, AlertTriangle,
+  RefreshCw, ExternalLink, Layers, Code2, MessageSquare,
+  ChevronDown, ChevronUp, XCircle, Pause, Play,
+  Key, Eye, EyeOff, ShieldCheck, Trash2, Edit3, Lock, Unlock
 } from 'lucide-react'
 import { useAppStore } from '../store/useAppStore'
-import { 
-  QWEN_MODEL_CATALOG, 
-  MODEL_FEATURE_TYPES, 
-  MODEL_FAMILIES,
-  MODEL_STATE_LABELS,
-  OPENVINO_STATUS_LABELS,
-  BENCHMARK_STATUS_LABELS
-} from '../hooks/modelCatalog'
-import { Button } from '../components/Button'
-import { Input } from '../components/Input'
 import { PageTransition, FadeIn, StaggerContainer, StaggerItem } from '../components/PageTransition'
 
-const iconMap: Record<string, React.ReactNode> = {
-  MessageSquare: <MessageSquare className="w-5 h-5" />,
-  Code2: <Code2 className="w-5 h-5" />,
-  FileText: <FileText className="w-5 h-5" />,
-  Eye: <Eye className="w-5 h-5" />,
-  Mic: <Mic className="w-5 h-5" />,
-  Volume2: <Volume2 className="w-5 h-5" />,
-  Layers: <Layers className="w-5 h-5" />,
-  Image: <Image className="w-5 h-5" />,
-}
+// ─────────────────────────────────────────────
+// Active model definitions (two supported cards)
+// ─────────────────────────────────────────────
+const ACTIVE_MODELS = [
+  {
+    id: 'Qwen2.5-Omni-3B',
+    displayName: 'Omni Personal Assistant',
+    subtitle: 'Qwen2.5-Omni · 3B · Multimodal',
+    description: 'Offline AI chat with voice, vision and local memory. Powered by the Qwen2.5-Omni multimodal model optimized via OpenVINO.',
+    featureType: 'personal_assistant',
+    icon: MessageSquare,
+    color: 'text-edge-cyan',
+    bgColor: 'bg-edge-cyan/10',
+    borderColor: 'border-edge-cyan/30',
+    glowColor: 'shadow-edge-cyan/20',
+    gradientFrom: 'from-edge-cyan/20',
+    gradientTo: 'to-qwen-violet/10',
+    parameterSize: '3B',
+    recommendedRamGb: 12,
+    recommendedDevice: 'GPU',
+    precisionOptions: ['FP16', 'INT8', 'INT4'],
+    defaultPrecision: 'INT4',
+    sourceUrl: 'https://huggingface.co/Qwen/Qwen2.5-Omni-3B',
+    workspacePath: '/personal-assistant',
+    workspaceLabel: 'Open Personal Assistant',
+  },
+  {
+    id: 'Qwen2.5-Coder-1.5B-Instruct-ov-int4',
+    displayName: 'Qwen Coder',
+    subtitle: 'Qwen2.5-Coder · 1.5B · Code Generation',
+    description: 'Intelligent code generation, debugging, and explanation. Runs locally with OpenVINO acceleration for ultra-fast inference.',
+    featureType: 'coding_agent',
+    icon: Code2,
+    color: 'text-qwen-violet',
+    bgColor: 'bg-qwen-violet/10',
+    borderColor: 'border-qwen-violet/30',
+    glowColor: 'shadow-qwen-violet/20',
+    gradientFrom: 'from-qwen-violet/20',
+    gradientTo: 'to-edge-blue/10',
+    parameterSize: '1.5B',
+    recommendedRamGb: 8,
+    recommendedDevice: 'GPU',
+    precisionOptions: ['FP16', 'INT8', 'INT4'],
+    defaultPrecision: 'INT4',
+    sourceUrl: 'https://huggingface.co/Qwen/Qwen2.5-Coder-1.5B-Instruct',
+    workspacePath: '/coding-agent',
+    workspaceLabel: 'Open Coding Agent',
+  },
+] as const
 
-function getStateColor(state: string) {
+// ─────────────────────────────────────────────
+// Pipeline step labels shown on the button
+// ─────────────────────────────────────────────
+function getPipelineStepLabel(state: string): { label: string; step: number; total: number } {
   switch (state) {
-    case 'ready': return 'text-status-ready'
+    case 'not-installed':
+    case 'not_installed':
+      return { label: 'Download Weights', step: 0, total: 3 }
+    case 'queued':
     case 'downloading':
+      return { label: 'Downloading…', step: 1, total: 3 }
+    case 'verifying':
+      return { label: 'Verifying…', step: 1, total: 3 }
+    case 'downloaded':
+      return { label: 'Optimize Model', step: 1, total: 3 }
     case 'converting':
+      return { label: 'Optimizing…', step: 2, total: 3 }
     case 'quantizing':
+      return { label: 'Quantizing…', step: 2, total: 3 }
     case 'benchmarking':
-    case 'verifying': return 'text-status-preparing'
-    case 'failed': return 'text-status-error'
-    case 'not-installed': return 'text-text-muted'
-    default: return 'text-text-secondary'
+      return { label: 'Benchmarking…', step: 3, total: 3 }
+    case 'ready':
+      return { label: 'Ready to Use', step: 3, total: 3 }
+    case 'failed':
+      return { label: 'Retry Setup', step: 0, total: 3 }
+    default:
+      return { label: 'Download Weights', step: 0, total: 3 }
   }
 }
 
-function getStateBadge(state: string) {
-  switch (state) {
-    case 'ready': return 'status-ready'
-    case 'downloading':
-    case 'converting':
-    case 'quantizing':
-    case 'benchmarking':
-    case 'verifying': return 'status-preparing'
-    case 'failed': return 'status-error'
-    case 'not-installed': return 'bg-aurora-surface-hover text-text-muted border border-aurora-border'
-    default: return 'bg-aurora-surface-hover text-text-secondary border border-aurora-border'
-  }
+const PIPELINE_STAGES = ['Download', 'Optimize', 'Ready to Use']
+
+function PipelineStepsBar({ state, progress }: { state: string; progress: number }) {
+  const { step } = getPipelineStepLabel(state)
+  const isActive = ['queued','downloading','verifying','converting','quantizing','benchmarking'].includes(state)
+  const isFailed = state === 'failed'
+  const isReady = state === 'ready'
+
+  return (
+    <div className="mt-4 mb-1">
+      {/* Stage labels */}
+      <div className="flex items-center justify-between mb-2">
+        {PIPELINE_STAGES.map((stageName, idx) => {
+          const done = isReady || (idx < step && !isFailed)
+          const current = isActive && idx === (step > 0 ? step - 1 : 0)
+          return (
+            <div key={stageName} className="flex flex-col items-center gap-1 flex-1">
+              <div
+                className={`w-6 h-6 rounded-full flex items-center justify-center text-[10px] font-bold border-2 transition-all duration-500 ${
+                  done
+                    ? 'bg-status-ready border-status-ready text-white'
+                    : current
+                    ? 'bg-aurora-surface border-edge-cyan text-edge-cyan animate-pulse'
+                    : isFailed && idx === 0
+                    ? 'bg-status-error/20 border-status-error text-status-error'
+                    : 'bg-aurora-surface border-aurora-border text-text-muted'
+                }`}
+              >
+                {done ? '✓' : idx + 1}
+              </div>
+              <span
+                className={`text-[9px] font-semibold uppercase tracking-wider ${
+                  done ? 'text-status-ready' : current ? 'text-edge-cyan' : 'text-text-muted'
+                }`}
+              >
+                {stageName}
+              </span>
+            </div>
+          )
+        })}
+        {/* Connector lines between stages */}
+        <div className="absolute" />
+      </div>
+      {/* Progress bar (shown when active) */}
+      {isActive && (
+        <div className="w-full h-1.5 bg-aurora-surface-hover rounded-full overflow-hidden mt-1">
+          <motion.div
+            className="h-full bg-gradient-to-r from-edge-cyan to-qwen-violet rounded-full"
+            initial={{ width: 0 }}
+            animate={{ width: `${progress}%` }}
+            transition={{ duration: 0.5 }}
+          />
+        </div>
+      )}
+    </div>
+  )
 }
 
-function ModelCard({ model, onSelect, onPrepare, onStop, onDelete }: {
-  model: typeof QWEN_MODEL_CATALOG[0]
-  onSelect: () => void
-  onPrepare: (precision: string) => void
+// ─────────────────────────────────────────────
+// Individual Model Card
+// ─────────────────────────────────────────────
+function ModelCard({
+  modelDef,
+  liveModel,
+  onPrepare,
+  onStop,
+  onBenchmark,
+}: {
+  modelDef: typeof ACTIVE_MODELS[number]
+  liveModel: any | null
+  onPrepare: (precision: string, step: 'download' | 'convert' | 'all') => void
   onStop: () => void
-  onDelete: () => void
+  onBenchmark: () => void
 }) {
-  const [expanded, setExpanded] = useState(false)
-  const [showSettings, setShowSettings] = useState(false)
-  const [selectedPrecision, setSelectedPrecision] = useState('int4')
-  const featureInfo = MODEL_FEATURE_TYPES[model.featureType as keyof typeof MODEL_FEATURE_TYPES] || MODEL_FEATURE_TYPES.personal_assistant
-  const familyInfo = MODEL_FAMILIES[model.family as keyof typeof MODEL_FAMILIES]
+  const navigate = useNavigate()
+  const [selectedPrecision, setSelectedPrecision] = useState<string>(modelDef.defaultPrecision)
+  const [showInfo, setShowInfo] = useState(false)
 
-  const isDownloading = ['downloading', 'converting', 'quantizing', 'benchmarking', 'verifying', 'queued'].includes(model.state)
+  const state = liveModel?.state ?? 'not-installed'
+  const progress = liveModel?.progress ?? 0
+  const jobMessage = liveModel?.jobMessage ?? ''
+  const benchmark = liveModel?.benchmark ?? null
+
+  const isProcessing = ['queued', 'downloading', 'verifying', 'converting', 'quantizing', 'benchmarking'].includes(state)
+  const isReady = state === 'ready'
+  const isDownloaded = state === 'downloaded'
+  const isFailed = state === 'failed'
+  const isNotInstalled = !isProcessing && !isReady && !isDownloaded && !isFailed
+
+  const { label: pipelineLabel } = getPipelineStepLabel(state)
+
+  const Icon = modelDef.icon
+
+  const handlePrimaryAction = () => {
+    if (isReady) {
+      navigate(modelDef.workspacePath)
+    } else if (isDownloaded) {
+      onPrepare(selectedPrecision, 'convert')
+    } else if (isFailed || isNotInstalled) {
+      onPrepare(selectedPrecision, 'download')
+    }
+  }
 
   return (
     <motion.div
-      layout
-      initial={{ opacity: 0, y: 20 }}
+      initial={{ opacity: 0, y: 24 }}
       animate={{ opacity: 1, y: 0 }}
-      exit={{ opacity: 0, y: -20 }}
-      whileHover={{ scale: 1.01, transition: { duration: 0.2 } }}
-      className="glass-card-hover p-5 cursor-pointer"
-      onClick={onSelect}
+      transition={{ duration: 0.4 }}
+      className={`relative flex flex-col rounded-2xl border ${modelDef.borderColor} bg-aurora-surface overflow-hidden shadow-xl ${modelDef.glowColor} hover:shadow-2xl transition-shadow duration-300`}
     >
-      {/* Header */}
-      <div className="flex items-start justify-between mb-3">
-        <div className="flex items-center gap-3">
-          <div className={`p-2 rounded-xl ${featureInfo.bgColor} ${featureInfo.color}`}>
-            {iconMap[featureInfo.icon] || <Zap className="w-5 h-5" />}
+      {/* Top gradient stripe */}
+      <div className={`h-1.5 w-full bg-gradient-to-r ${modelDef.gradientFrom} ${modelDef.gradientTo}`} />
+
+      {/* Card body */}
+      <div className="p-6 flex flex-col gap-5 flex-1">
+
+        {/* Header row */}
+        <div className="flex items-start justify-between gap-4">
+          <div className="flex items-center gap-4">
+            <div className={`p-3 rounded-xl ${modelDef.bgColor} ${modelDef.color} shrink-0`}>
+              <Icon className="w-6 h-6" />
+            </div>
+            <div>
+              <h3 className="text-lg font-bold text-text-primary leading-tight">{modelDef.displayName}</h3>
+              <p className="text-xs text-text-muted mt-0.5">{modelDef.subtitle}</p>
+            </div>
           </div>
+          {/* State badge */}
+          <div className="shrink-0">
+            {isReady && (
+              <span className="flex items-center gap-1.5 px-2.5 py-1 rounded-full bg-status-ready/10 border border-status-ready/30 text-status-ready text-[11px] font-semibold">
+                <CheckCircle2 className="w-3 h-3" /> Ready
+              </span>
+            )}
+            {isProcessing && (
+              <span className="flex items-center gap-1.5 px-2.5 py-1 rounded-full bg-edge-cyan/10 border border-edge-cyan/30 text-edge-cyan text-[11px] font-semibold animate-pulse">
+                <RefreshCw className="w-3 h-3 animate-spin" /> Processing
+              </span>
+            )}
+            {isFailed && (
+              <span className="flex items-center gap-1.5 px-2.5 py-1 rounded-full bg-status-error/10 border border-status-error/30 text-status-error text-[11px] font-semibold">
+                <XCircle className="w-3 h-3" /> Failed
+              </span>
+            )}
+            {isNotInstalled && (
+              <span className="flex items-center gap-1.5 px-2.5 py-1 rounded-full bg-aurora-surface-hover border border-aurora-border text-text-muted text-[11px] font-semibold">
+                Not Installed
+              </span>
+            )}
+          </div>
+        </div>
+
+        {/* Description */}
+        <p className="text-sm text-text-secondary leading-relaxed">{modelDef.description}</p>
+
+        {/* Specs row */}
+        <div className="grid grid-cols-3 gap-3">
+          <div className="flex flex-col items-center gap-1 p-2.5 rounded-xl bg-aurora-surface-hover/50 border border-aurora-border/20">
+            <Cpu className="w-4 h-4 text-edge-cyan" />
+            <span className="text-xs font-bold text-text-primary">{modelDef.parameterSize}</span>
+            <span className="text-[9px] text-text-muted uppercase tracking-wider">Parameters</span>
+          </div>
+          <div className="flex flex-col items-center gap-1 p-2.5 rounded-xl bg-aurora-surface-hover/50 border border-aurora-border/20">
+            <HardDrive className="w-4 h-4 text-qwen-violet" />
+            <span className="text-xs font-bold text-text-primary">{modelDef.recommendedRamGb}GB</span>
+            <span className="text-[9px] text-text-muted uppercase tracking-wider">RAM</span>
+          </div>
+          <div className="flex flex-col items-center gap-1 p-2.5 rounded-xl bg-aurora-surface-hover/50 border border-aurora-border/20">
+            <Zap className="w-4 h-4 text-status-warning" />
+            <span className="text-xs font-bold text-text-primary">{modelDef.recommendedDevice}</span>
+            <span className="text-[9px] text-text-muted uppercase tracking-wider">Device</span>
+          </div>
+        </div>
+
+        {/* Precision selector pills */}
+        {!isProcessing && (
           <div>
-            <h3 className="font-semibold text-text-primary text-sm">{model.name}</h3>
-            <p className="text-xs text-text-muted mt-0.5">{familyInfo?.description || model.family}</p>
+            <p className="text-[10px] font-bold uppercase tracking-wider text-text-muted mb-2">Optimization Format</p>
+            <div className="flex gap-2">
+              {modelDef.precisionOptions.map((p) => (
+                <button
+                  key={p}
+                  onClick={() => setSelectedPrecision(p)}
+                  disabled={isReady}
+                  className={`px-3 py-1.5 rounded-lg text-xs font-bold border transition-all duration-200 ${
+                    selectedPrecision === p
+                      ? `${modelDef.bgColor} ${modelDef.color} ${modelDef.borderColor} shadow-sm`
+                      : 'bg-aurora-surface-hover border-aurora-border text-text-muted hover:border-aurora-border/80'
+                  } ${isReady ? 'opacity-60 cursor-default' : 'cursor-pointer'}`}
+                >
+                  {p}
+                </button>
+              ))}
+            </div>
+            {isReady && liveModel?.precision && (
+              <p className="text-[10px] text-text-muted mt-1">
+                Installed as: <span className="text-text-secondary font-semibold">{liveModel.precision}</span>
+              </p>
+            )}
           </div>
+        )}
+
+        {/* Pipeline steps bar */}
+        <PipelineStepsBar state={state} progress={progress} />
+
+        {/* Active job message */}
+        {isProcessing && jobMessage && (
+          <div className="flex items-center gap-2 text-xs text-text-secondary bg-aurora-surface-hover/40 border border-aurora-border/20 rounded-lg px-3 py-2">
+            <RefreshCw className="w-3 h-3 text-edge-cyan animate-spin shrink-0" />
+            <span className="truncate">{jobMessage}</span>
+            <span className="ml-auto font-mono text-edge-cyan">{progress}%</span>
+          </div>
+        )}
+
+        {/* Failed error box */}
+        {isFailed && (
+          <div className="p-3 rounded-xl bg-status-error/10 border border-status-error/30">
+            <div className="flex items-center gap-2 mb-1">
+              <AlertTriangle className="w-4 h-4 text-status-error" />
+              <span className="text-xs font-semibold text-status-error">Preparation Failed</span>
+            </div>
+            {jobMessage && (
+              <p className="text-[10px] text-text-muted font-mono truncate">{jobMessage}</p>
+            )}
+          </div>
+        )}
+
+        {/* Benchmark summary (when ready) */}
+        {isReady && benchmark && (
+          <div className="p-3 rounded-xl bg-aurora-surface-hover/30 border border-aurora-border/20">
+            <div className="flex items-center gap-2 mb-2">
+              <BarChart3 className="w-3.5 h-3.5 text-edge-cyan" />
+              <span className="text-[10px] font-bold uppercase tracking-wider text-edge-cyan">Benchmark</span>
+              <span className="text-[10px] text-text-muted ml-auto">{benchmark.device} · {benchmark.precision}</span>
+            </div>
+            <div className="grid grid-cols-3 gap-2">
+              <div className="text-center">
+                <p className="text-sm font-bold text-text-primary">{benchmark.firstTokenLatency || '—'}ms</p>
+                <p className="text-[9px] text-text-muted">First Token</p>
+              </div>
+              <div className="text-center">
+                <p className="text-sm font-bold text-text-primary">{benchmark.tokensPerSecond || '—'}</p>
+                <p className="text-[9px] text-text-muted">tok/s</p>
+              </div>
+              <div className="text-center">
+                <p className="text-sm font-bold text-text-primary">{benchmark.loadTimeMs || '—'}ms</p>
+                <p className="text-[9px] text-text-muted">Load Time</p>
+              </div>
+            </div>
+          </div>
+        )}
+
+        {/* Primary Action Button */}
+        <div className="flex gap-2 mt-auto">
+          {isProcessing ? (
+            <button
+              onClick={onStop}
+              className="flex-1 flex items-center justify-center gap-2 px-4 py-3 rounded-xl bg-status-error/10 border border-status-error/30 text-status-error text-sm font-semibold hover:bg-status-error/20 transition-colors"
+            >
+              <Pause className="w-4 h-4" /> Stop
+            </button>
+          ) : isReady ? (
+            <button
+              onClick={handlePrimaryAction}
+              className={`flex-1 flex items-center justify-center gap-2 px-4 py-3 rounded-xl ${modelDef.bgColor} border ${modelDef.borderColor} ${modelDef.color} text-sm font-bold hover:brightness-110 transition-all shadow-lg`}
+            >
+              <Play className="w-4 h-4" /> {modelDef.workspaceLabel}
+            </button>
+          ) : (
+            <button
+              onClick={handlePrimaryAction}
+              className={`flex-1 flex items-center justify-center gap-2 px-4 py-3 rounded-xl bg-gradient-to-r ${modelDef.gradientFrom.replace('/20','/30')} to-transparent border ${modelDef.borderColor} ${modelDef.color} text-sm font-bold hover:brightness-110 transition-all`}
+            >
+              {isFailed ? (
+                <><RefreshCw className="w-4 h-4" /> {pipelineLabel}</>
+              ) : (
+                <><Download className="w-4 h-4" /> {pipelineLabel}</>
+              )}
+            </button>
+          )}
         </div>
-        <div className="flex items-center gap-2">
-          <span className={`status-badge ${getStateBadge(model.state)}`}>
-            {MODEL_STATE_LABELS[model.state] || model.state}
-          </span>
+
+        {/* Secondary actions row */}
+        <div className="flex gap-2">
+          <button
+            onClick={onBenchmark}
+            disabled={!isReady}
+            className={`flex-1 flex items-center justify-center gap-1.5 px-3 py-2 rounded-lg text-xs font-semibold border transition-colors ${
+              isReady
+                ? 'bg-aurora-surface-hover border-aurora-border text-text-secondary hover:border-edge-cyan/40 hover:text-edge-cyan'
+                : 'bg-aurora-surface-hover/30 border-aurora-border/30 text-text-muted opacity-50 cursor-not-allowed'
+            }`}
+          >
+            <BarChart3 className="w-3.5 h-3.5" /> Benchmark
+          </button>
+          <button
+            onClick={() => setShowInfo(!showInfo)}
+            className="flex-1 flex items-center justify-center gap-1.5 px-3 py-2 rounded-lg text-xs font-semibold border border-aurora-border bg-aurora-surface-hover text-text-secondary hover:border-qwen-violet/40 hover:text-qwen-violet transition-colors"
+          >
+            <Info className="w-3.5 h-3.5" />
+            Info
+            {showInfo ? <ChevronUp className="w-3 h-3" /> : <ChevronDown className="w-3 h-3" />}
+          </button>
         </div>
       </div>
 
-      {/* Model Info */}
-      <div className="grid grid-cols-2 gap-3 mb-3">
-        <div className="flex items-center gap-2 text-xs text-text-secondary">
-          <Cpu className="w-3.5 h-3.5 text-edge-cyan" />
-          <span>{model.parameterSize} Parameters</span>
-        </div>
-        <div className="flex items-center gap-2 text-xs text-text-secondary">
-          <HardDrive className="w-3.5 h-3.5 text-qwen-violet" />
-          <span>{model.recommendedRamGb}GB RAM</span>
-        </div>
-        <div className="flex items-center gap-2 text-xs text-text-secondary">
-          <Zap className="w-3.5 h-3.5 text-status-warning" />
-          <span>{model.recommendedDevice}</span>
-        </div>
-        <div className="flex items-center gap-2 text-xs text-text-secondary">
-          <MemoryStick className="w-3.5 h-3.5 text-status-ready" />
-          <span>{model.precisionOptions.join(', ')}</span>
-        </div>
-      </div>
-
-      {/* Benchmark Summary (if available) */}
-      {model.benchmark && (
-        <div className="mb-3 p-2.5 rounded-lg bg-aurora-surface-hover/30 border border-aurora-border/20">
-          <div className="flex items-center gap-2 mb-2">
-            <BarChart3 className="w-3.5 h-3.5 text-edge-cyan" />
-            <span className="text-[10px] font-bold uppercase tracking-wider text-edge-cyan">Benchmarks</span>
-          </div>
-          <div className="grid grid-cols-3 gap-2">
-            <div className="text-center">
-              <p className="text-xs font-bold text-text-primary">{model.benchmark.firstTokenLatency}ms</p>
-              <p className="text-[8px] text-text-muted">First Token</p>
-            </div>
-            <div className="text-center">
-              <p className="text-xs font-bold text-text-primary">{model.benchmark.tokensPerSecond}</p>
-              <p className="text-[8px] text-text-muted">tok/s</p>
-            </div>
-            <div className="text-center">
-              <p className="text-xs font-bold text-text-primary">{model.benchmark.loadTimeMs}ms</p>
-              <p className="text-[8px] text-text-muted">Load Time</p>
-            </div>
-          </div>
-        </div>
-      )}
-
-      {/* Status Row */}
-      <div className="flex items-center justify-between pt-3 border-t border-aurora-border/30">
-        <div className="flex items-center gap-3">
-          <div className="flex items-center gap-1.5">
-            <div className={`w-2 h-2 rounded-full ${model.openvinoStatus === 'converted' ? 'bg-status-ready' : 'bg-status-warning'}`} />
-            <span className="text-xs text-text-muted">
-              OpenVINO: {OPENVINO_STATUS_LABELS[model.openvinoStatus] || model.openvinoStatus}
-            </span>
-          </div>
-          <div className="flex items-center gap-1.5">
-            <div className={`w-2 h-2 rounded-full ${model.benchmarkStatus === 'completed' ? 'bg-status-ready' : 'bg-status-warning'}`} />
-            <span className="text-xs text-text-muted">
-              Benchmark: {BENCHMARK_STATUS_LABELS[model.benchmarkStatus] || model.benchmarkStatus}
-            </span>
-          </div>
-        </div>
-        <button
-          onClick={(e) => { e.stopPropagation(); setExpanded(!expanded) }}
-          className="p-1 rounded-lg hover:bg-aurora-surface-hover transition-colors"
-        >
-          {expanded ? <ChevronUp className="w-4 h-4 text-text-muted" /> : <ChevronDown className="w-4 h-4 text-text-muted" />}
-        </button>
-      </div>
-
-      {/* Expanded Details */}
+      {/* Info Panel (expanded) */}
       <AnimatePresence>
-        {expanded && (
+        {showInfo && (
           <motion.div
             initial={{ height: 0, opacity: 0 }}
             animate={{ height: 'auto', opacity: 1 }}
             exit={{ height: 0, opacity: 0 }}
-            transition={{ duration: 0.3 }}
-            className="overflow-hidden"
+            transition={{ duration: 0.25 }}
+            className="overflow-hidden border-t border-aurora-border/30"
           >
-            <div className="pt-3 mt-3 border-t border-aurora-border/30 space-y-2">
-              <div className="flex items-center justify-between text-xs">
-                <span className="text-text-muted">Feature Type</span>
-                <span className={featureInfo.color}>{featureInfo.label}</span>
-              </div>
-              <div className="flex items-center justify-between text-xs">
-                <span className="text-text-muted">License</span>
-                <span className="text-text-secondary">{model.license}</span>
-              </div>
-              <div className="flex items-center justify-between text-xs">
-                <span className="text-text-muted">NPU Support</span>
-                <span className={model.npuStatus === 'supported' ? 'text-status-ready' : model.npuStatus === 'not-supported' ? 'text-status-error' : 'text-text-muted'}>
-                  {model.npuStatus === 'supported' ? 'Supported' : model.npuStatus === 'not-supported' ? 'Not Supported' : 'Unknown'}
-                </span>
-              </div>
-              <div className="flex items-center justify-between text-xs">
+            <div className="px-6 py-4 space-y-2.5 bg-aurora-surface-hover/20">
+              <p className="text-[10px] font-bold uppercase tracking-wider text-text-muted mb-3">Model Details</p>
+
+              <InfoRow label="Model ID" value={modelDef.id} mono />
+              <InfoRow label="Feature Type" value={modelDef.featureType} />
+              <InfoRow label="Parameters" value={modelDef.parameterSize} />
+              <InfoRow label="RAM Required" value={`${modelDef.recommendedRamGb} GB`} />
+              <InfoRow label="Recommended Device" value={modelDef.recommendedDevice} />
+              <InfoRow label="Precision Options" value={modelDef.precisionOptions.join(', ')} />
+              {liveModel?.precision && (
+                <InfoRow label="Installed Precision" value={liveModel.precision} />
+              )}
+              {liveModel?.diskSizeGb > 0 && (
+                <InfoRow label="Disk Size" value={`${liveModel.diskSizeGb} GB`} />
+              )}
+              {liveModel?.openvino_path && (
+                <InfoRow label="OpenVINO Path" value={liveModel.openvino_path} mono />
+              )}
+              <div className="flex items-center justify-between text-xs pt-1">
                 <span className="text-text-muted">Source</span>
-                <a 
-                  href={model.sourceUrl} 
-                  target="_blank" 
+                <a
+                  href={modelDef.sourceUrl}
+                  target="_blank"
                   rel="noopener noreferrer"
                   className="text-edge-cyan hover:underline flex items-center gap-1"
-                  onClick={(e) => e.stopPropagation()}
                 >
                   HuggingFace <ExternalLink className="w-3 h-3" />
                 </a>
               </div>
-              {model.localOpenVinoPath && (
-                <div className="flex items-center justify-between text-xs">
-                  <span className="text-text-muted">OpenVINO Path</span>
-                  <span className="text-text-secondary font-mono text-[10px]">{model.localOpenVinoPath}</span>
-                </div>
-              )}
-              {model.diskSizeGb !== undefined && model.diskSizeGb > 0 && (
-                <div className="flex items-center justify-between text-xs">
-                  <span className="text-text-muted">Disk Size</span>
-                  <span className="text-text-secondary">{model.diskSizeGb} GB</span>
-                </div>
-              )}
-              <div className="flex items-center justify-between text-xs">
-                <span className="text-text-muted">Last Updated</span>
-                <span className="text-text-secondary">{model.lastUpdated}</span>
-              </div>
-            </div>
 
-            {/* Full Benchmark Details (expanded) */}
-            {model.benchmark && (
-              <div className="mt-3 p-3 rounded-lg bg-aurora-surface-hover/30 border border-aurora-border/20 space-y-2">
-                <div className="flex items-center gap-2 mb-2">
-                  <BarChart3 className="w-3.5 h-3.5 text-edge-cyan" />
-                  <span className="text-[10px] font-bold uppercase tracking-wider text-edge-cyan">Detailed Benchmarks</span>
-                </div>
-                <div className="grid grid-cols-2 gap-2 text-xs">
-                  <div className="flex justify-between">
-                    <span className="text-text-muted">Device</span>
-                    <span className="text-text-secondary font-medium">{model.benchmark.device}</span>
-                  </div>
-                  <div className="flex justify-between">
-                    <span className="text-text-muted">Precision</span>
-                    <span className="text-text-secondary font-medium">{model.benchmark.precision}</span>
-                  </div>
-                  <div className="flex justify-between">
-                    <span className="text-text-muted">First Token Latency</span>
-                    <span className="text-text-secondary font-medium">{model.benchmark.firstTokenLatency}ms</span>
-                  </div>
-                  <div className="flex justify-between">
-                    <span className="text-text-muted">Throughput</span>
-                    <span className="text-text-secondary font-medium">{model.benchmark.tokensPerSecond} tok/s</span>
-                  </div>
-                  <div className="flex justify-between">
-                    <span className="text-text-muted">Model Load Time</span>
-                    <span className="text-text-secondary font-medium">{model.benchmark.loadTimeMs}ms</span>
-                  </div>
-                  <div className="flex justify-between">
-                    <span className="text-text-muted">RAM Used</span>
-                    <span className="text-text-secondary font-medium">{Math.round(model.benchmark.ramUsedMb)}MB</span>
-                  </div>
-                  {model.benchmark.gpuUsedMb > 0 && (
-                    <div className="flex justify-between">
-                      <span className="text-text-muted">GPU VRAM</span>
-                      <span className="text-text-secondary font-medium">{Math.round(model.benchmark.gpuUsedMb)}MB</span>
-                    </div>
+              {/* Detailed benchmark (if available) */}
+              {isReady && benchmark && (
+                <div className="mt-3 pt-3 border-t border-aurora-border/30 space-y-2">
+                  <p className="text-[10px] font-bold uppercase tracking-wider text-text-muted">Detailed Benchmark</p>
+                  <InfoRow label="Device" value={benchmark.device} />
+                  <InfoRow label="Precision" value={benchmark.precision} />
+                  <InfoRow label="First Token Latency" value={`${benchmark.firstTokenLatency} ms`} />
+                  <InfoRow label="Throughput" value={`${benchmark.tokensPerSecond} tok/s`} />
+                  <InfoRow label="Model Load Time" value={`${benchmark.loadTimeMs} ms`} />
+                  <InfoRow label="RAM Used" value={`${Math.round(benchmark.ramUsedMb)} MB`} />
+                  {benchmark.gpuUsedMb > 0 && (
+                    <InfoRow label="GPU VRAM" value={`${Math.round(benchmark.gpuUsedMb)} MB`} />
                   )}
-                  <div className="flex justify-between">
-                    <span className="text-text-muted">NPU Status</span>
-                    <span className={`font-medium ${model.benchmark.npuStatus === 'available' ? 'text-status-ready' : 'text-text-muted'}`}>
-                      {model.benchmark.npuStatus}
-                    </span>
-                  </div>
-                </div>
-              </div>
-            )}
-
-            {/* Real-time Conversion Progress Bar */}
-            {['downloading', 'converting', 'quantizing', 'benchmarking', 'verifying', 'queued'].includes(model.state) && (
-              <div className="mt-3 p-3 rounded-lg bg-aurora-surface-hover/30 border border-aurora-border/20 space-y-2">
-                <div className="flex justify-between text-xs text-text-secondary">
-                  <span className="font-medium animate-pulse">{model.jobMessage || 'Preparing model...'}</span>
-                  <span>{model.progress ?? 0}%</span>
-                </div>
-                <div className="w-full h-1.5 bg-aurora-surface-hover rounded-full overflow-hidden">
-                  <div
-                    className="h-full bg-gradient-to-r from-edge-cyan to-qwen-violet rounded-full transition-all duration-500"
-                    style={{ width: `${model.progress ?? 0}%` }}
+                  <InfoRow
+                    label="NPU Status"
+                    value={benchmark.npuStatus === 'available' ? 'Available' : 'Not Used'}
+                    valueClass={benchmark.npuStatus === 'available' ? 'text-status-ready' : 'text-text-muted'}
                   />
                 </div>
-              </div>
-            )}
-
-            {/* Failed State Error */}
-            {model.state === 'failed' && (
-              <div className="mt-3 p-3 rounded-lg bg-status-error/10 border border-status-error/30">
-                <div className="flex items-center gap-2">
-                  <AlertTriangle className="w-4 h-4 text-status-error" />
-                  <span className="text-xs font-semibold text-status-error">Download/Conversion Failed</span>
-                </div>
-                {model.jobMessage && (
-                  <p className="text-[10px] text-text-muted mt-1.5 font-mono">{model.jobMessage}</p>
-                )}
-                <p className="text-[10px] text-text-secondary mt-2">Click "Retry Download" to try again, or "Clear Status" to reset.</p>
-              </div>
-            )}
-
-            {/* Action Buttons - No Load button */}
-            <div className="flex gap-2 mt-4">
-              {model.state === 'not-installed' && (
-                <>
-                  <div className="relative">
-                    <Button variant="primary" size="sm" onClick={(e) => { e.stopPropagation(); setShowSettings(!showSettings) }}>
-                      <Settings className="w-4 h-4 mr-1" /> Download & Convert
-                    </Button>
-                    {showSettings && (
-                      <div className="absolute bottom-full left-0 mb-2 w-72 p-4 bg-aurora-surface border border-aurora-border/60 shadow-2xl rounded-xl z-50" onClick={(e) => e.stopPropagation()}>
-                        <h4 className="text-xs font-bold uppercase tracking-wider text-edge-cyan mb-3">Conversion Settings</h4>
-                        <div className="space-y-3">
-                          <div>
-                            <label className="text-[10px] font-bold text-text-secondary uppercase tracking-wider">Weight Format</label>
-                            <select
-                              value={selectedPrecision}
-                              onChange={(e) => setSelectedPrecision(e.target.value)}
-                              className="w-full bg-aurora-surface border border-aurora-border p-2 rounded-input text-xs text-text-primary focus:outline-none mt-1"
-                            >
-                              {model.precisionOptions.map(p => (
-                                <option key={p} value={p.toLowerCase()}>{p}</option>
-                              ))}
-                            </select>
-                          </div>
-                          <div className="flex gap-2">
-                            <Button variant="primary" size="sm" className="flex-1" onClick={(e) => { e.stopPropagation(); onPrepare(selectedPrecision); setShowSettings(false) }}>
-                              <Download className="w-4 h-4 mr-1" /> Start
-                            </Button>
-                            <Button variant="secondary" size="sm" onClick={(e) => { e.stopPropagation(); setShowSettings(false) }}>
-                              Cancel
-                            </Button>
-                          </div>
-                        </div>
-                      </div>
-                    )}
-                  </div>
-                  <Button 
-                    variant="secondary" 
-                    size="sm" 
-                    onClick={async (e) => { 
-                      e.stopPropagation(); 
-                      try {
-                        await fetch(`http://localhost:8000/api/models/${model.id}/status`, {
-                          method: 'POST',
-                          headers: { 'Content-Type': 'application/json' },
-                          body: JSON.stringify({ status: 'ready' })
-                        });
-                        window.location.reload();
-                      } catch (err) {
-                        console.error(err);
-                      }
-                    }}
-                  >
-                    <CheckCircle2 className="w-4 h-4 mr-1" /> Mark Ready
-                  </Button>
-                </>
               )}
-              {isDownloading && (
-                <>
-                  <Button variant="danger" size="sm" onClick={(e) => { e.stopPropagation(); onStop() }}>
-                    <Pause className="w-4 h-4 mr-1" /> Stop
-                  </Button>
-                </>
-              )}
-              {model.state === 'failed' && (
-                <>
-                  <div className="relative">
-                    <Button variant="primary" size="sm" onClick={(e) => { e.stopPropagation(); setShowSettings(!showSettings) }}>
-                      <RefreshCw className="w-4 h-4 mr-1" /> Retry Download
-                    </Button>
-                    {showSettings && (
-                      <div className="absolute bottom-full left-0 mb-2 w-72 p-4 bg-aurora-surface border border-aurora-border/60 shadow-2xl rounded-xl z-50" onClick={(e) => e.stopPropagation()}>
-                        <h4 className="text-xs font-bold uppercase tracking-wider text-edge-cyan mb-3">Conversion Settings</h4>
-                        <div className="space-y-3">
-                          <div>
-                            <label className="text-[10px] font-bold text-text-secondary uppercase tracking-wider">Weight Format</label>
-                            <select
-                              value={selectedPrecision}
-                              onChange={(e) => setSelectedPrecision(e.target.value)}
-                              className="w-full bg-aurora-surface border border-aurora-border p-2 rounded-input text-xs text-text-primary focus:outline-none mt-1"
-                            >
-                              {model.precisionOptions.map(p => (
-                                <option key={p} value={p.toLowerCase()}>{p}</option>
-                              ))}
-                            </select>
-                          </div>
-                          <div className="flex gap-2">
-                            <Button variant="primary" size="sm" className="flex-1" onClick={(e) => { e.stopPropagation(); onPrepare(selectedPrecision); setShowSettings(false) }}>
-                              <RefreshCw className="w-4 h-4 mr-1" /> Retry
-                            </Button>
-                            <Button variant="secondary" size="sm" onClick={(e) => { e.stopPropagation(); setShowSettings(false) }}>
-                              Cancel
-                            </Button>
-                          </div>
-                        </div>
-                      </div>
-                    )}
-                  </div>
-                  <Button 
-                    variant="secondary" 
-                    size="sm" 
-                    onClick={async (e) => { 
-                      e.stopPropagation(); 
-                      try {
-                        await fetch(`http://localhost:8000/api/models/${model.id}/status`, {
-                          method: 'POST',
-                          headers: { 'Content-Type': 'application/json' },
-                          body: JSON.stringify({ status: 'not_installed' })
-                        });
-                        window.location.reload();
-                      } catch (err) {
-                        console.error(err);
-                      }
-                    }}
-                  >
-                    <XCircle className="w-4 h-4 mr-1" /> Clear Status
-                  </Button>
-                </>
-              )}
-              {model.state === 'ready' && (
-                <Button variant="secondary" size="sm" onClick={(e) => e.stopPropagation()}>
-                  <BarChart3 className="w-4 h-4 mr-1" /> Benchmark
-                </Button>
-              )}
-              {model.state === 'loaded' && (
-                <Button variant="danger" size="sm" onClick={(e) => { e.stopPropagation(); onDelete() }}>
-                  <Pause className="w-4 h-4 mr-1" /> Unload
-                </Button>
-              )}
-              <Button variant="ghost" size="sm" onClick={(e) => e.stopPropagation()}>
-                <Info className="w-4 h-4 mr-1" /> Details
-              </Button>
             </div>
           </motion.div>
         )}
@@ -444,114 +465,523 @@ function ModelCard({ model, onSelect, onPrepare, onStop, onDelete }: {
   )
 }
 
+function InfoRow({
+  label,
+  value,
+  mono = false,
+  valueClass,
+}: {
+  label: string
+  value: string
+  mono?: boolean
+  valueClass?: string
+}) {
+  return (
+    <div className="flex items-center justify-between text-xs">
+      <span className="text-text-muted">{label}</span>
+      <span className={`${mono ? 'font-mono text-[10px]' : ''} ${valueClass ?? 'text-text-secondary'} max-w-[55%] truncate text-right`}>
+        {value}
+      </span>
+    </div>
+  )
+}
+
+// ─────────────────────────────────────────────
+// HuggingFace Token Panel
+// ─────────────────────────────────────────────
+interface HFTokenStatus {
+  configured: boolean
+  masked: string | null
+  prefix: string | null
+  length: number
+}
+
+function HFTokenPanel() {
+  const [tokenStatus, setTokenStatus] = useState<HFTokenStatus | null>(null)
+  const [loading, setLoading] = useState(true)
+  const [editing, setEditing] = useState(false)
+  const [tokenInput, setTokenInput] = useState('')
+  const [showToken, setShowToken] = useState(false)
+  const [actionLoading, setActionLoading] = useState('')
+  const [toast, setToast] = useState<{ type: 'success' | 'error'; msg: string } | null>(null)
+  const [confirmDelete, setConfirmDelete] = useState(false)
+
+  const showToast = (type: 'success' | 'error', msg: string) => {
+    setToast({ type, msg })
+    setTimeout(() => setToast(null), 3500)
+  }
+
+  const fetchStatus = async () => {
+    try {
+      const res = await fetch('http://localhost:8000/api/settings/hf-token')
+      if (res.ok) setTokenStatus(await res.json())
+    } catch {
+      // silently ignore if backend not running
+    } finally {
+      setLoading(false)
+    }
+  }
+
+  useEffect(() => { fetchStatus() }, [])
+
+  const handleSave = async () => {
+    const t = tokenInput.trim()
+    if (!t.startsWith('hf_')) {
+      showToast('error', 'Token must start with hf_')
+      return
+    }
+    setActionLoading('save')
+    try {
+      const res = await fetch('http://localhost:8000/api/settings/hf-token', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ token: t }),
+      })
+      if (res.ok) {
+        setEditing(false)
+        setTokenInput('')
+        setShowToken(false)
+        await fetchStatus()
+        showToast('success', 'HuggingFace token saved successfully.')
+      } else {
+        const err = await res.json()
+        showToast('error', err.detail || 'Failed to save token.')
+      }
+    } catch {
+      showToast('error', 'Could not reach backend.')
+    } finally {
+      setActionLoading('')
+    }
+  }
+
+  const handleRevoke = async () => {
+    setActionLoading('revoke')
+    try {
+      const res = await fetch('http://localhost:8000/api/settings/hf-token/revoke', { method: 'POST' })
+      if (res.ok) {
+        await fetchStatus()
+        showToast('success', 'Token revoked. Downloads will run unauthenticated.')
+      }
+    } catch {
+      showToast('error', 'Could not reach backend.')
+    } finally {
+      setActionLoading('')
+    }
+  }
+
+  const handleDelete = async () => {
+    setActionLoading('delete')
+    try {
+      const res = await fetch('http://localhost:8000/api/settings/hf-token', { method: 'DELETE' })
+      if (res.ok) {
+        setConfirmDelete(false)
+        await fetchStatus()
+        showToast('success', 'Token permanently deleted.')
+      }
+    } catch {
+      showToast('error', 'Could not reach backend.')
+    } finally {
+      setActionLoading('')
+    }
+  }
+
+  const isConfigured = tokenStatus?.configured === true
+
+  return (
+    <div className="mt-8 rounded-2xl border border-aurora-border/30 bg-aurora-surface overflow-hidden">
+      {/* Header */}
+      <div className="flex items-center justify-between px-5 py-4 border-b border-aurora-border/30 bg-aurora-surface-hover/20">
+        <div className="flex items-center gap-3">
+          <div className="p-2 rounded-xl bg-status-warning/10">
+            <Key className="w-4 h-4 text-status-warning" />
+          </div>
+          <div>
+            <p className="text-sm font-bold text-text-primary">HuggingFace API Token</p>
+            <p className="text-[11px] text-text-muted mt-0.5">
+              Enables authenticated, rate-limit-free model downloads
+            </p>
+          </div>
+        </div>
+        {/* Status badge */}
+        {!loading && (
+          <div className="shrink-0">
+            {isConfigured ? (
+              <span className="flex items-center gap-1.5 px-2.5 py-1 rounded-full bg-status-ready/10 border border-status-ready/30 text-status-ready text-[11px] font-semibold">
+                <ShieldCheck className="w-3 h-3" /> Configured
+              </span>
+            ) : (
+              <span className="flex items-center gap-1.5 px-2.5 py-1 rounded-full bg-status-warning/10 border border-status-warning/30 text-status-warning text-[11px] font-semibold">
+                <AlertTriangle className="w-3 h-3" /> Not Set
+              </span>
+            )}
+          </div>
+        )}
+      </div>
+
+      <div className="px-5 py-4 space-y-4">
+
+        {/* Token display row */}
+        {!editing && (
+          <div className="flex items-center gap-3">
+            <div className="flex-1 flex items-center gap-3 px-3.5 py-2.5 rounded-xl bg-aurora-surface-hover/50 border border-aurora-border/30">
+              <Lock className="w-4 h-4 text-text-muted shrink-0" />
+              <span className="flex-1 font-mono text-sm text-text-secondary tracking-widest">
+                {loading
+                  ? '...'
+                  : isConfigured
+                  ? (showToken ? tokenStatus!.prefix + '…' : tokenStatus!.masked)
+                  : 'No token configured'}
+              </span>
+              {isConfigured && (
+                <button
+                  onClick={() => setShowToken(!showToken)}
+                  className="p-1 rounded text-text-muted hover:text-text-secondary transition-colors"
+                  title={showToken ? 'Hide token' : 'Show prefix'}
+                >
+                  {showToken ? <EyeOff className="w-4 h-4" /> : <Eye className="w-4 h-4" />}
+                </button>
+              )}
+            </div>
+
+            {/* Action buttons */}
+            <div className="flex gap-2 shrink-0">
+              <button
+                onClick={() => { setEditing(true); setTokenInput('') }}
+                title={isConfigured ? 'Edit token' : 'Add token'}
+                className="flex items-center gap-1.5 px-3 py-2.5 rounded-xl border border-aurora-border bg-aurora-surface-hover text-xs font-semibold text-text-secondary hover:text-edge-cyan hover:border-edge-cyan/40 transition-colors"
+              >
+                <Edit3 className="w-3.5 h-3.5" />
+                {isConfigured ? 'Edit' : 'Add Token'}
+              </button>
+
+              {isConfigured && (
+                <>
+                  <button
+                    onClick={handleRevoke}
+                    disabled={actionLoading === 'revoke'}
+                    title="Revoke token (deactivate without deleting)"
+                    className="flex items-center gap-1.5 px-3 py-2.5 rounded-xl border border-status-warning/30 bg-status-warning/5 text-xs font-semibold text-status-warning hover:bg-status-warning/10 transition-colors disabled:opacity-50"
+                  >
+                    {actionLoading === 'revoke'
+                      ? <RefreshCw className="w-3.5 h-3.5 animate-spin" />
+                      : <Unlock className="w-3.5 h-3.5" />}
+                    Revoke
+                  </button>
+
+                  <button
+                    onClick={() => setConfirmDelete(true)}
+                    title="Permanently delete token"
+                    className="flex items-center gap-1.5 px-3 py-2.5 rounded-xl border border-status-error/30 bg-status-error/5 text-xs font-semibold text-status-error hover:bg-status-error/10 transition-colors"
+                  >
+                    <Trash2 className="w-3.5 h-3.5" />
+                    Delete
+                  </button>
+                </>
+              )}
+            </div>
+          </div>
+        )}
+
+        {/* Edit / Add token form */}
+        <AnimatePresence>
+          {editing && (
+            <motion.div
+              initial={{ height: 0, opacity: 0 }}
+              animate={{ height: 'auto', opacity: 1 }}
+              exit={{ height: 0, opacity: 0 }}
+              transition={{ duration: 0.2 }}
+              className="overflow-hidden"
+            >
+              <div className="space-y-3">
+                <p className="text-xs text-text-muted">
+                  Enter your HuggingFace access token (starts with <code className="text-edge-cyan">hf_</code>).
+                  {' '}Get one at{' '}
+                  <a
+                    href="https://huggingface.co/settings/tokens"
+                    target="_blank"
+                    rel="noopener noreferrer"
+                    className="text-edge-cyan hover:underline inline-flex items-center gap-0.5"
+                  >
+                    huggingface.co/settings/tokens <ExternalLink className="w-3 h-3" />
+                  </a>
+                </p>
+                <div className="relative">
+                  <input
+                    type={showToken ? 'text' : 'password'}
+                    value={tokenInput}
+                    onChange={(e) => setTokenInput(e.target.value)}
+                    placeholder="Enter Hugging Face access token"
+                    className="w-full bg-aurora-surface border border-aurora-border/60 rounded-xl px-4 py-3 pr-12 text-sm font-mono text-text-primary placeholder:text-text-muted focus:outline-none focus:border-edge-cyan/50 transition-colors"
+                    autoFocus
+                    onKeyDown={(e) => { if (e.key === 'Enter') handleSave() }}
+                  />
+                  <button
+                    type="button"
+                    onClick={() => setShowToken(!showToken)}
+                    className="absolute right-3 top-1/2 -translate-y-1/2 text-text-muted hover:text-text-secondary transition-colors"
+                  >
+                    {showToken ? <EyeOff className="w-4 h-4" /> : <Eye className="w-4 h-4" />}
+                  </button>
+                </div>
+                <div className="flex gap-2">
+                  <button
+                    onClick={handleSave}
+                    disabled={!tokenInput.trim() || actionLoading === 'save'}
+                    className="flex items-center gap-2 px-4 py-2 rounded-xl bg-edge-cyan/10 border border-edge-cyan/30 text-edge-cyan text-xs font-bold hover:bg-edge-cyan/20 transition-colors disabled:opacity-50 disabled:cursor-not-allowed"
+                  >
+                    {actionLoading === 'save'
+                      ? <RefreshCw className="w-3.5 h-3.5 animate-spin" />
+                      : <CheckCircle2 className="w-3.5 h-3.5" />}
+                    Save Token
+                  </button>
+                  <button
+                    onClick={() => { setEditing(false); setTokenInput(''); setShowToken(false) }}
+                    className="px-4 py-2 rounded-xl border border-aurora-border bg-aurora-surface-hover text-xs font-semibold text-text-secondary hover:text-text-primary transition-colors"
+                  >
+                    Cancel
+                  </button>
+                </div>
+              </div>
+            </motion.div>
+          )}
+        </AnimatePresence>
+
+        {/* Delete confirmation */}
+        <AnimatePresence>
+          {confirmDelete && (
+            <motion.div
+              initial={{ opacity: 0, scale: 0.97 }}
+              animate={{ opacity: 1, scale: 1 }}
+              exit={{ opacity: 0, scale: 0.97 }}
+              className="p-4 rounded-xl bg-status-error/10 border border-status-error/30 space-y-3"
+            >
+              <div className="flex items-start gap-2">
+                <AlertTriangle className="w-4 h-4 text-status-error mt-0.5 shrink-0" />
+                <div>
+                  <p className="text-xs font-bold text-status-error">Permanently Delete Token?</p>
+                  <p className="text-[11px] text-text-muted mt-0.5">
+                    The token will be removed from storage. Future downloads will run unauthenticated.
+                  </p>
+                </div>
+              </div>
+              <div className="flex gap-2">
+                <button
+                  onClick={handleDelete}
+                  disabled={actionLoading === 'delete'}
+                  className="flex items-center gap-1.5 px-4 py-2 rounded-lg bg-status-error text-white text-xs font-bold hover:bg-status-error/90 transition-colors disabled:opacity-50"
+                >
+                  {actionLoading === 'delete'
+                    ? <RefreshCw className="w-3.5 h-3.5 animate-spin" />
+                    : <Trash2 className="w-3.5 h-3.5" />}
+                  Yes, Delete
+                </button>
+                <button
+                  onClick={() => setConfirmDelete(false)}
+                  className="px-4 py-2 rounded-lg border border-aurora-border bg-aurora-surface-hover text-xs font-semibold text-text-secondary hover:text-text-primary transition-colors"
+                >
+                  Cancel
+                </button>
+              </div>
+            </motion.div>
+          )}
+        </AnimatePresence>
+
+        {/* Info note */}
+        {!editing && (
+          <p className="text-[11px] text-text-muted leading-relaxed">
+            <ShieldCheck className="w-3 h-3 inline mr-1 text-status-ready" />
+            Token is stored locally in your SQLite database and never sent to any external service
+            other than HuggingFace Hub. It is never returned in full via any API response.
+          </p>
+        )}
+      </div>
+
+      {/* Toast notification */}
+      <AnimatePresence>
+        {toast && (
+          <motion.div
+            initial={{ opacity: 0, y: 8 }}
+            animate={{ opacity: 1, y: 0 }}
+            exit={{ opacity: 0, y: 8 }}
+            className={`mx-5 mb-4 px-4 py-2.5 rounded-xl flex items-center gap-2 text-xs font-semibold ${
+              toast.type === 'success'
+                ? 'bg-status-ready/10 border border-status-ready/30 text-status-ready'
+                : 'bg-status-error/10 border border-status-error/30 text-status-error'
+            }`}
+          >
+            {toast.type === 'success'
+              ? <CheckCircle2 className="w-4 h-4 shrink-0" />
+              : <XCircle className="w-4 h-4 shrink-0" />}
+            {toast.msg}
+          </motion.div>
+        )}
+      </AnimatePresence>
+    </div>
+  )
+}
+
+// ─────────────────────────────────────────────
+// Main Page
+// ─────────────────────────────────────────────
 export function ModelManagerPage() {
+
   const navigate = useNavigate()
-  const { models, setModels, updateModel, selectedModel, setSelectedModel, hardwareInfo } = useAppStore()
-  const [searchQuery, setSearchQuery] = useState('')
-  const [selectedFamily, setSelectedFamily] = useState<string>('all')
-  const [selectedFeature, setSelectedFeature] = useState<string>('all')
-  const [selectedState, setSelectedState] = useState<string>('all')
-  const [viewMode, setViewMode] = useState<'grid' | 'list'>('grid')
-  const [sortBy, setSortBy] = useState<'name' | 'size' | 'state'>('name')
+  const { models, setModels, updateModel } = useAppStore()
   const [loading, setLoading] = useState(true)
   const [activeJobs, setActiveJobs] = useState<Record<string, string>>({})
 
+  // Map job status strings to model state strings
   const JOB_STATUS_MAP: Record<string, string> = {
-    'running': 'downloading',
-    'downloading': 'downloading',
-    'converting': 'converting',
-    'quantizing': 'quantizing',
-    'benchmarking': 'benchmarking',
-    'verifying': 'verifying',
-    'queued': 'queued',
-    'completed': 'ready',
-    'ready': 'ready',
-    'failed': 'failed',
-    'cancelled': 'not-installed',
+    running: 'downloading',
+    downloading: 'downloading',
+    verifying: 'verifying',
+    converting: 'converting',
+    quantizing: 'quantizing',
+    benchmarking: 'benchmarking',
+    queued: 'queued',
+    completed: 'ready',
+    ready: 'ready',
+    downloaded: 'downloaded',
+    failed: 'failed',
+    cancelled: 'not-installed',
   }
 
-  useEffect(() => {
-    const fetchCatalog = async () => {
+  const fetchCatalog = useCallback(async () => {
+    try {
+      const res = await fetch('http://localhost:8000/api/models/catalog')
+      if (res.ok) {
+        const data = await res.json()
+        setModels(data.models)
+      }
+    } catch (err) {
+      console.error('Error loading model catalog:', err)
+    } finally {
+      setLoading(false)
+    }
+  }, [setModels])
+
+  const pollJobs = useCallback(async () => {
+    for (const [modelId, jobId] of Object.entries(activeJobs)) {
       try {
-        const res = await fetch('http://localhost:8000/api/models/catalog')
+        const res = await fetch(`http://localhost:8000/api/jobs/${jobId}`)
         if (res.ok) {
-          const data = await res.json()
-          setModels(data.models)
+          const job = await res.json()
+          const newState = JOB_STATUS_MAP[job.status] || job.status
+          updateModel(modelId, {
+            state: newState,
+            jobStatus: job.status,
+            jobMessage: job.message,
+            progress: job.progress || 0,
+          })
+          if (['completed', 'failed', 'cancelled', 'downloaded'].includes(job.status)) {
+            setActiveJobs((prev) => {
+              const n = { ...prev }
+              delete n[modelId]
+              return n
+            })
+            // Refresh catalog after job completes
+            fetchCatalog()
+          }
         }
       } catch (err) {
-        console.error("Error loading model catalog:", err)
-      } finally {
-        setLoading(false)
+        console.error(`Error polling job for ${modelId}:`, err)
       }
     }
+  }, [activeJobs, updateModel, fetchCatalog])
 
-    const pollJobs = async () => {
-      for (const [modelId, jobId] of Object.entries(activeJobs)) {
-        try {
-          const res = await fetch(`http://localhost:8000/api/jobs/${jobId}`)
-          if (res.ok) {
-            const job = await res.json()
-            const newState = JOB_STATUS_MAP[job.status] || job.status
-            updateModel(modelId, {
-              state: newState,
-              jobStatus: job.status,
-              jobMessage: job.message,
-              progress: job.progress || 0,
-            })
-            if (['completed', 'failed', 'cancelled'].includes(job.status)) {
-              setActiveJobs(prev => { const n = { ...prev }; delete n[modelId]; return n })
-            }
-          }
-        } catch (err) {
-          console.error(`Error polling job for ${modelId}:`, err)
+  useEffect(() => {
+    fetchCatalog()
+    const catalogInterval = setInterval(fetchCatalog, 4000)
+    const jobInterval = setInterval(pollJobs, 1500)
+    return () => {
+      clearInterval(catalogInterval)
+      clearInterval(jobInterval)
+    }
+  }, [fetchCatalog, pollJobs])
+
+  // Find live model data for each active model card
+  const getLiveModel = (modelId: string) => {
+    return models.find((m) => m.id === modelId) ?? null
+  }
+
+  // Stats derived from only the two active models
+  const activeModelData = ACTIVE_MODELS.map((def) => getLiveModel(def.id))
+  const readyCount = activeModelData.filter((m) => m?.state === 'ready').length
+  const totalCount = ACTIVE_MODELS.length
+
+  const handlePrepare = async (modelId: string, precision: string, step: 'download' | 'convert' | 'all' = 'all') => {
+    try {
+      updateModel(modelId, {
+        state: 'queued',
+        openvinoStatus: step === 'convert' ? 'converting' : 'downloading',
+        progress: 0,
+        jobMessage: step === 'convert' ? 'Queuing optimization job…' : 'Queuing download job…',
+      })
+      const res = await fetch(`http://localhost:8000/api/models/${modelId}/prepare`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          precision: precision.toUpperCase(),
+          step: step,
+        }),
+      })
+      if (res.ok) {
+        const data = await res.json()
+        if (data.job_id) {
+          setActiveJobs((prev) => ({ ...prev, [modelId]: data.job_id }))
         }
       }
+    } catch (err) {
+      console.error('Error preparing model:', err)
+      updateModel(modelId, { state: 'failed', jobMessage: 'Failed to queue job' })
     }
+  }
 
-    fetchCatalog()
-    const catalogInterval = setInterval(fetchCatalog, 3000)
-    const jobInterval = setInterval(pollJobs, 1500)
-    return () => { clearInterval(catalogInterval); clearInterval(jobInterval) }
-  }, [activeJobs])
+  const handleStop = async (modelId: string) => {
+    try {
+      await fetch(`http://localhost:8000/api/models/${modelId}/stop`, { method: 'POST' })
+      updateModel(modelId, {
+        state: 'not-installed',
+        openvinoStatus: 'not_downloaded',
+        progress: 0,
+        jobMessage: '',
+      })
+      setActiveJobs((prev) => {
+        const n = { ...prev }
+        delete n[modelId]
+        return n
+      })
+    } catch (err) {
+      console.error('Error stopping model:', err)
+    }
+  }
 
-  // Use database catalog models as source of truth, fallback to static catalog if empty
-  const catalogModels = models.length > 0 ? models : QWEN_MODEL_CATALOG
-
-  // Filter models
-  const filteredModels = catalogModels.filter((model) => {
-    const matchesSearch = model.name.toLowerCase().includes(searchQuery.toLowerCase()) ||
-      model.family.toLowerCase().includes(searchQuery.toLowerCase()) ||
-      model.featureType.toLowerCase().includes(searchQuery.toLowerCase())
-    
-    const matchesFamily = selectedFamily === 'all' || model.family === selectedFamily
-    const matchesFeature = selectedFeature === 'all' || model.featureType === selectedFeature
-    const matchesState = selectedState === 'all' || model.state === selectedState
-
-    return matchesSearch && matchesFamily && matchesFeature && matchesState
-  })
-
-  // Sort models
-  const sortedModels = [...filteredModels].sort((a, b) => {
-    if (sortBy === 'name') return a.name.localeCompare(b.name)
-    if (sortBy === 'size') return parseFloat(a.parameterSize) - parseFloat(b.parameterSize)
-    return a.state.localeCompare(b.state)
-  })
-
-  // Stats
-  const stats = {
-    total: catalogModels.length,
-    ready: catalogModels.filter(m => m.state === 'ready').length,
-    installed: catalogModels.filter(m => ['ready', 'loaded', 'running'].includes(m.state)).length,
-    notInstalled: catalogModels.filter(m => m.state === 'not-installed').length,
+  const handleBenchmark = async (modelId: string) => {
+    try {
+      const liveModel = getLiveModel(modelId)
+      await fetch(`http://localhost:8000/api/models/${modelId}/benchmark`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          device: liveModel?.recommendedDevice ?? 'GPU',
+          precision: liveModel?.precision ?? 'INT4',
+        }),
+      })
+      // Refresh to get new benchmark data
+      setTimeout(fetchCatalog, 3000)
+    } catch (err) {
+      console.error('Error running benchmark:', err)
+    }
   }
 
   return (
     <PageTransition>
       <div className="min-h-screen bg-aurora-base">
-        {/* Header */}
+
+        {/* ── Header ── */}
         <div className="sticky top-0 z-10 bg-aurora-base/80 backdrop-blur-glass border-b border-aurora-border/30">
-          <div className="max-w-7xl mx-auto px-4 sm:px-6 lg:px-8 py-4">
-            <div className="flex flex-col sm:flex-row sm:items-center sm:justify-between gap-4">
+          <div className="max-w-6xl mx-auto px-4 sm:px-6 lg:px-8 py-4">
+            <div className="flex items-center justify-between gap-4">
               <div className="flex items-center gap-3">
                 <button
                   onClick={() => navigate('/dashboard')}
@@ -561,231 +991,131 @@ export function ModelManagerPage() {
                 </button>
                 <div>
                   <h1 className="text-2xl font-bold text-text-primary">Model Manager</h1>
-                  <p className="text-sm text-text-secondary mt-1">
-                    {stats.total} models in catalog • {stats.ready} ready to use
+                  <p className="text-sm text-text-secondary mt-0.5">
+                    {readyCount} of {totalCount} models ready to use
                   </p>
                 </div>
               </div>
-              <div className="flex items-center gap-3">
-                <Button variant="secondary" size="sm">
-                  <RefreshCw className="w-4 h-4 mr-1.5" /> Refresh
-                </Button>
-                <Button variant="primary" size="sm">
-                  <Download className="w-4 h-4 mr-1.5" /> Import Model
-                </Button>
-              </div>
+              <button
+                onClick={fetchCatalog}
+                className="flex items-center gap-2 px-4 py-2 rounded-lg border border-aurora-border bg-aurora-surface hover:bg-aurora-surface-hover text-sm text-text-secondary hover:text-text-primary transition-colors"
+              >
+                <RefreshCw className="w-4 h-4" /> Refresh
+              </button>
             </div>
           </div>
         </div>
 
-        <div className="max-w-7xl mx-auto px-4 sm:px-6 lg:px-8 py-6">
-          {/* Stats Cards */}
-          <FadeIn delay={0.1}>
-            <div className="grid grid-cols-2 sm:grid-cols-4 gap-4 mb-6">
-              <div className="glass-card p-4">
-                <div className="flex items-center gap-3">
-                  <div className="p-2 rounded-xl bg-edge-cyan/10">
+        <div className="max-w-6xl mx-auto px-4 sm:px-6 lg:px-8 py-8">
+
+          {/* ── Hero banner ── */}
+          <FadeIn delay={0.05}>
+            <div className="relative rounded-2xl border border-aurora-border/30 bg-aurora-surface overflow-hidden mb-8 p-6">
+              <div className="absolute inset-0 bg-neural-grid opacity-10" />
+              <div className="absolute top-0 left-1/2 -translate-x-1/2 w-96 h-40 bg-edge-cyan/5 rounded-full blur-[60px]" />
+              <div className="relative flex flex-col sm:flex-row items-start sm:items-center justify-between gap-4">
+                <div>
+                  <div className="flex items-center gap-2 mb-1">
                     <Layers className="w-5 h-5 text-edge-cyan" />
+                    <span className="text-xs font-bold uppercase tracking-wider text-edge-cyan">OpenVINO Pipeline</span>
                   </div>
-                  <div>
-                    <p className="text-2xl font-bold text-text-primary">{stats.total}</p>
-                    <p className="text-xs text-text-muted">Total Models</p>
-                  </div>
+                  <h2 className="text-xl font-bold text-text-primary">AI Model Preparation</h2>
+                  <p className="text-sm text-text-secondary mt-1 max-w-lg">
+                    Download and optimize models with Intel OpenVINO. Models are converted and quantized
+                    for maximum performance on your AI PC hardware.
+                  </p>
                 </div>
-              </div>
-              <div className="glass-card p-4">
-                <div className="flex items-center gap-3">
-                  <div className="p-2 rounded-xl bg-status-ready/10">
-                    <CheckCircle2 className="w-5 h-5 text-status-ready" />
-                  </div>
-                  <div>
-                    <p className="text-2xl font-bold text-text-primary">{stats.ready}</p>
+                <div className="flex items-center gap-6 shrink-0">
+                  <div className="text-center">
+                    <p className="text-3xl font-black text-text-primary">{readyCount}</p>
                     <p className="text-xs text-text-muted">Ready</p>
                   </div>
-                </div>
-              </div>
-              <div className="glass-card p-4">
-                <div className="flex items-center gap-3">
-                  <div className="p-2 rounded-xl bg-status-preparing/10">
-                    <Clock className="w-5 h-5 text-status-preparing" />
-                  </div>
-                  <div>
-                    <p className="text-2xl font-bold text-text-primary">{stats.installed}</p>
-                    <p className="text-xs text-text-muted">Installed</p>
-                  </div>
-                </div>
-              </div>
-              <div className="glass-card p-4">
-                <div className="flex items-center gap-3">
-                  <div className="p-2 rounded-xl bg-status-warning/10">
-                    <AlertTriangle className="w-5 h-5 text-status-warning" />
-                  </div>
-                  <div>
-                    <p className="text-2xl font-bold text-text-primary">{stats.notInstalled}</p>
-                    <p className="text-xs text-text-muted">Not Installed</p>
+                  <div className="w-px h-10 bg-aurora-border/40" />
+                  <div className="text-center">
+                    <p className="text-3xl font-black text-text-primary">{totalCount}</p>
+                    <p className="text-xs text-text-muted">Total</p>
                   </div>
                 </div>
               </div>
             </div>
           </FadeIn>
 
-          {/* Filters */}
-          <FadeIn delay={0.2}>
-            <div className="glass-card p-4 mb-6">
-              <div className="flex flex-col sm:flex-row gap-4">
-                <div className="flex-1">
-                  <Input
-                    placeholder="Search models by name, family, or feature..."
-                    value={searchQuery}
-                    onChange={(e) => setSearchQuery(e.target.value)}
-                    leftIcon={<Search className="w-4 h-4" />}
-                  />
-                </div>
-                <div className="flex gap-3">
-                  <select
-                    value={selectedFamily}
-                    onChange={(e) => setSelectedFamily(e.target.value)}
-                    className="input-field w-auto min-w-[150px]"
-                  >
-                    <option value="all">All Families</option>
-                    {Object.entries(MODEL_FAMILIES).map(([key, val]) => (
-                      <option key={key} value={key}>{val.label}</option>
-                    ))}
-                  </select>
-                  <select
-                    value={selectedFeature}
-                    onChange={(e) => setSelectedFeature(e.target.value)}
-                    className="input-field w-auto min-w-[150px]"
-                  >
-                    <option value="all">All Features</option>
-                    {Object.entries(MODEL_FEATURE_TYPES).map(([key, val]) => (
-                      <option key={key} value={key}>{val.label}</option>
-                    ))}
-                  </select>
-                  <select
-                    value={selectedState}
-                    onChange={(e) => setSelectedState(e.target.value)}
-                    className="input-field w-auto min-w-[150px]"
-                  >
-                    <option value="all">All States</option>
-                    <option value="ready">Ready</option>
-                    <option value="not-installed">Not Installed</option>
-                    <option value="downloading">Downloading</option>
-                    <option value="converting">Converting</option>
-                    <option value="failed">Failed</option>
-                    <option value="loaded">Loaded</option>
-                    <option value="running">Running</option>
-                  </select>
-                </div>
-              </div>
-              <div className="flex items-center justify-between mt-4 pt-4 border-t border-aurora-border/30">
-                <div className="flex items-center gap-2">
-                  <span className="text-xs text-text-muted">Sort by:</span>
-                  <button
-                    onClick={() => setSortBy('name')}
-                    className={`text-xs px-2 py-1 rounded ${sortBy === 'name' ? 'bg-edge-cyan/20 text-edge-cyan' : 'text-text-secondary hover:bg-aurora-surface-hover'}`}
-                  >
-                    Name
-                  </button>
-                  <button
-                    onClick={() => setSortBy('size')}
-                    className={`text-xs px-2 py-1 rounded ${sortBy === 'size' ? 'bg-edge-cyan/20 text-edge-cyan' : 'text-text-secondary hover:bg-aurora-surface-hover'}`}
-                  >
-                    Size
-                  </button>
-                  <button
-                    onClick={() => setSortBy('state')}
-                    className={`text-xs px-2 py-1 rounded ${sortBy === 'state' ? 'bg-edge-cyan/20 text-edge-cyan' : 'text-text-secondary hover:bg-aurora-surface-hover'}`}
-                  >
-                    State
-                  </button>
-                </div>
-                <div className="flex items-center gap-2">
-                  <button
-                    onClick={() => setViewMode('grid')}
-                    className={`p-1.5 rounded ${viewMode === 'grid' ? 'bg-edge-cyan/20 text-edge-cyan' : 'text-text-secondary hover:bg-aurora-surface-hover'}`}
-                  >
-                    <Grid className="w-4 h-4" />
-                  </button>
-                  <button
-                    onClick={() => setViewMode('list')}
-                    className={`p-1.5 rounded ${viewMode === 'list' ? 'bg-edge-cyan/20 text-edge-cyan' : 'text-text-secondary hover:bg-aurora-surface-hover'}`}
-                  >
-                    <List className="w-4 h-4" />
-                  </button>
-                </div>
-              </div>
-            </div>
-          </FadeIn>
-
-          {/* Model Grid */}
-          <StaggerContainer delay={0.05}>
-            <div className={`grid gap-4 ${viewMode === 'grid' ? 'grid-cols-1 md:grid-cols-2 lg:grid-cols-3' : 'grid-cols-1'}`}>
-              {sortedModels.map((model) => (
-                <StaggerItem key={model.id}>
-                  <ModelCard
-                    model={model}
-                    onSelect={() => setSelectedModel(model)}
-                    onPrepare={async (precision) => {
-                      try {
-                        updateModel(model.id, { state: 'queued', openvinoStatus: 'downloading', progress: 0, jobMessage: 'Queuing download job...' })
-                        const res = await fetch(`http://localhost:8000/api/models/${model.id}/prepare`, {
-                          method: 'POST',
-                          headers: { 'Content-Type': 'application/json' },
-                          body: JSON.stringify({ precision: precision.toUpperCase() })
-                        })
-                        if (res.ok) {
-                          const data = await res.json()
-                          if (data.job_id) {
-                            setActiveJobs(prev => ({ ...prev, [model.id]: data.job_id }))
-                          }
-                        }
-                      } catch (err) {
-                        console.error("Error preparing model:", err)
-                        updateModel(model.id, { state: 'failed', jobMessage: 'Failed to queue job' })
-                      }
-                    }}
-                    onStop={async () => {
-                      try {
-                        await fetch(`http://localhost:8000/api/models/${model.id}/stop`, {
-                          method: 'POST'
-                        })
-                        updateModel(model.id, { state: 'not-installed', openvinoStatus: 'not_downloaded', progress: 0, jobMessage: '' })
-                        setActiveJobs(prev => { const n = { ...prev }; delete n[model.id]; return n })
-                      } catch (err) {
-                        console.error("Error stopping model:", err)
-                      }
-                    }}
-                    onDelete={async () => {
-                      try {
-                        updateModel(model.id, { state: 'ready' })
-                        await fetch('http://localhost:8000/api/runtime/unload', {
-                          method: 'POST'
-                        })
-                      } catch (err) {
-                        console.error("Error unloading model:", err)
-                      }
-                    }}
-                  />
-                </StaggerItem>
+          {/* ── Model Cards ── */}
+          {loading ? (
+            <div className="grid grid-cols-1 lg:grid-cols-2 gap-6">
+              {[0, 1].map((i) => (
+                <div
+                  key={i}
+                  className="rounded-2xl border border-aurora-border/30 bg-aurora-surface h-80 animate-pulse"
+                />
               ))}
             </div>
-          </StaggerContainer>
-
-          {sortedModels.length === 0 && (
-            <FadeIn delay={0.3}>
-              <div className="glass-card p-12 text-center">
-                <Search className="w-12 h-12 text-text-muted mx-auto mb-4" />
-                <h3 className="text-lg font-semibold text-text-primary mb-2">No models found</h3>
-                <p className="text-text-secondary">Try adjusting your search or filters</p>
+          ) : (
+            <StaggerContainer delay={0.08}>
+              <div className="grid grid-cols-1 lg:grid-cols-2 gap-6">
+                {ACTIVE_MODELS.map((modelDef) => (
+                  <StaggerItem key={modelDef.id}>
+                    <ModelCard
+                      modelDef={modelDef}
+                      liveModel={getLiveModel(modelDef.id)}
+                      onPrepare={(precision, step) => handlePrepare(modelDef.id, precision, step)}
+                      onStop={() => handleStop(modelDef.id)}
+                      onBenchmark={() => handleBenchmark(modelDef.id)}
+                    />
+                  </StaggerItem>
+                ))}
               </div>
-            </FadeIn>
+            </StaggerContainer>
           )}
+
+          {/* ── Pipeline explanation ── */}
+          <FadeIn delay={0.3}>
+            <div className="mt-8 p-5 rounded-xl border border-aurora-border/20 bg-aurora-surface-hover/20">
+              <p className="text-[11px] font-bold uppercase tracking-wider text-text-muted mb-3">How the Pipeline Works</p>
+              <div className="grid grid-cols-1 sm:grid-cols-3 gap-4">
+                {[
+                  {
+                    step: '1',
+                    title: 'Download',
+                    desc: 'Model weights are fetched from HuggingFace Hub and verified for integrity.',
+                    color: 'text-edge-cyan',
+                    bg: 'bg-edge-cyan/10',
+                  },
+                  {
+                    step: '2',
+                    title: 'Optimize',
+                    desc: 'Weights are converted to OpenVINO IR format and quantized to your chosen precision.',
+                    color: 'text-qwen-violet',
+                    bg: 'bg-qwen-violet/10',
+                  },
+                  {
+                    step: '3',
+                    title: 'Ready to Use',
+                    desc: 'Model is benchmarked and ready for inference on your CPU, GPU or NPU.',
+                    color: 'text-status-ready',
+                    bg: 'bg-status-ready/10',
+                  },
+                ].map(({ step, title, desc, color, bg }) => (
+                  <div key={step} className="flex gap-3">
+                    <div className={`w-7 h-7 rounded-full ${bg} ${color} flex items-center justify-center text-xs font-black shrink-0 mt-0.5`}>
+                      {step}
+                    </div>
+                    <div>
+                      <p className={`text-xs font-bold ${color}`}>{title}</p>
+                      <p className="text-[11px] text-text-muted mt-0.5 leading-relaxed">{desc}</p>
+                    </div>
+                  </div>
+                ))}
+              </div>
+            </div>
+          </FadeIn>
+
+          {/* ── HuggingFace Token Manager ── */}
+          <FadeIn delay={0.4}>
+            <HFTokenPanel />
+          </FadeIn>
         </div>
       </div>
     </PageTransition>
   )
 }
-
-// Import icons for iconMap
-import { MessageSquare } from 'lucide-react'

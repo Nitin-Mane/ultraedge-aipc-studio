@@ -16,7 +16,14 @@ export default defineConfig({
       '@animations': path.resolve(__dirname, './src/animations'),
     },
   },
+  test: {
+    globals: true,
+    environment: 'jsdom',
+    setupFiles: ['./src/test/setup.ts'],
+    css: false,
+  },
   server: {
+    host: '127.0.0.1',
     port: 3000,
     proxy: {
       '/api': {

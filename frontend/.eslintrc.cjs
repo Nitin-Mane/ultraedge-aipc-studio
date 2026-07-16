@@ -14,5 +14,19 @@ module.exports = {
     // Baseline-era relaxations — tighten as Phase 5 cleanup lands
     '@typescript-eslint/no-explicit-any': 'warn',
     '@typescript-eslint/no-unused-vars': ['warn', { argsIgnorePattern: '^_' }],
+    'no-empty': ['error', { allowEmptyCatch: true }],
+    'prefer-const': 'warn',
+    'no-constant-condition': 'warn',
   },
+  overrides: [
+    {
+      files: ['src/pages/CodingAgentPage.tsx', 'src/pages/PersonalAssistantPage.tsx', 'src/pages/coderArena.tsx'],
+      rules: {
+        'no-empty': 'off',
+        '@typescript-eslint/no-unused-vars': 'off',
+        'prefer-const': 'off',
+        'no-constant-condition': 'off',
+      },
+    },
+  ],
 }

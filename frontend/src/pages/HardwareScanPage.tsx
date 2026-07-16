@@ -9,8 +9,7 @@ import {
 import { useAppStore, HardwareInfo } from '../store/useAppStore'
 import { PageTransition, FadeIn, ParticleField } from '../components/PageTransition'
 import { Button } from '../components/Button'
-
-const BACKEND_URL = 'http://localhost:8000'
+import { getSystemProfile } from '../api/system'
 
 const fallbackHardware: HardwareInfo = {
   cpu: 'Intel Core Processor',
@@ -90,24 +89,21 @@ export function HardwareScanPage() {
     }, 400)
 
     try {
-      const res = await fetch(`${BACKEND_URL}/api/system/profile`)
-      if (res.ok) {
-        const data: BackendProfile = await res.json()
-        clearInterval(stepInterval)
+      const data = await getSystemProfile() as unknown as BackendProfile
+      clearInterval(stepInterval)
 
-        setCurrentStep('Loading results...')
-        setProgress(95)
-        await new Promise(r => setTimeout(r, 300))
+      setCurrentStep('Loading results...')
+      setProgress(95)
+      await new Promise(r => setTimeout(r, 300))
 
-        const mapped = mapBackendToHardware(data)
-        setHardware(mapped)
-        setHardwareInfo(mapped)
-        setHardwareScanned(true)
-        setCurrentStep('Analysis Complete!')
-        setProgress(100)
-        setScanning(false)
-        return
-      }
+      const mapped = mapBackendToHardware(data)
+      setHardware(mapped)
+      setHardwareInfo(mapped)
+      setHardwareScanned(true)
+      setCurrentStep('Analysis Complete!')
+      setProgress(100)
+      setScanning(false)
+      return
     } catch {
       // backend not reachable
     }
