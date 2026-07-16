@@ -2,6 +2,7 @@ import React, { useEffect, useState } from 'react'
 import { useNavigate, useSearchParams } from 'react-router-dom'
 import { useAppStore } from '../store/useAppStore'
 import { Cpu, HardDrive, Zap, Play, ArrowLeft, ShieldCheck, AlertTriangle } from 'lucide-react'
+import { getModelsCatalog } from '../api/models'
 
 export function ModelSelectionPage() {
   const navigate = useNavigate()
@@ -32,22 +33,19 @@ export function ModelSelectionPage() {
   useEffect(() => {
     const loadCatalog = async () => {
       try {
-        const res = await fetch('http://localhost:8000/api/models/catalog')
-        if (res.ok) {
-          const data = await res.json()
-          setModels(data.models)
-          
-          const dbFeatureName = featureMapping[featureId] || 'personal_assistant'
-          
-          let filtered = data.models.filter((m: any) => m.feature_type === dbFeatureName)
-          if (filtered.length === 0) {
-            filtered = data.models.filter((m: any) => m.feature_type === 'personal_assistant')
-          }
-          setFeatureModels(filtered)
-          
-          if (filtered.length > 0) {
-            setSelectedModelId(filtered[0].id)
-          }
+        const data = await getModelsCatalog()
+        setModels(data.models as any)
+        
+        const dbFeatureName = featureMapping[featureId] || 'personal_assistant'
+        
+        let filtered = data.models.filter((m: any) => m.feature_type === dbFeatureName)
+        if (filtered.length === 0) {
+          filtered = data.models.filter((m: any) => m.feature_type === 'personal_assistant')
+        }
+        setFeatureModels(filtered)
+        
+        if (filtered.length > 0) {
+          setSelectedModelId(filtered[0].id)
         }
       } catch (err) {
         console.error(err)

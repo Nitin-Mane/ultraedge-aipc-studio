@@ -1,13 +1,13 @@
+
 from fastapi import APIRouter
 from pydantic import BaseModel
-from typing import Optional
 
 router = APIRouter()
 
 class AgentRequest(BaseModel):
     task: str
     model_id: str
-    tools: Optional[list] = []
+    tools: list | None = []
 
 @router.post("/execute")
 async def execute_agent(request: AgentRequest):

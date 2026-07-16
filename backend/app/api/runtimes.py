@@ -1,45 +1,57 @@
 """Runtime executor for multiple programming languages."""
 
-import os
-import sys
 import json
-import shutil
-import tempfile
-import subprocess
+import os
 import platform
-from pathlib import Path
-from typing import Dict, Optional, List
+import shlex
+import shutil
+import subprocess
+import tempfile
+
 from fastapi import APIRouter, HTTPException
 from pydantic import BaseModel
 
+from app.config import settings
+
 router = APIRouter(prefix="/api/runtimes", tags=["runtimes"])
 
-SETTINGS_FILE = os.path.join(os.path.dirname(__file__), "..", "..", "runtime_settings.json")
+SETTINGS_FILE = str(settings.APP_DATA_DIR / "runtime_settings.json")
+
+
+def _require_code_execution() -> None:
+    if not settings.ENABLE_CODE_EXECUTION:
+        raise HTTPException(
+            status_code=403,
+            detail=(
+                "Local code execution is disabled. Set "
+                "ULTRAEEDGE_ENABLE_CODE_EXECUTION=true only on a trusted machine."
+            ),
+        )
 
 
 class RuntimeConfig(BaseModel):
     name: str
     language: str
     executable: str
-    version_cmd: List[str]
+    version_cmd: list[str]
     file_extension: str
-    compile_cmd: Optional[List[str]] = None
-    run_cmd: Optional[List[str]] = None
+    compile_cmd: list[str] | None = None
+    run_cmd: list[str] | None = None
     is_available: bool = False
-    version: Optional[str] = None
+    version: str | None = None
     platform: str = platform.system().lower()
 
 
 class RuntimeSettings(BaseModel):
-    paths: Dict[str, str] = {}
+    paths: dict[str, str] = {}
     auto_detect: bool = True
 
 
 class ExecuteRequest(BaseModel):
     code: str
     language: str
-    stdin: Optional[str] = None
-    timeout: Optional[int] = 30
+    stdin: str | None = None
+    timeout: int | None = 30
 
 
 DEFAULT_RUNTIMES = {
@@ -110,7 +122,7 @@ def get_settings() -> RuntimeSettings:
     """Load runtime settings from file."""
     if os.path.exists(SETTINGS_FILE):
         try:
-            with open(SETTINGS_FILE, "r") as f:
+            with open(SETTINGS_FILE) as f:
                 data = json.load(f)
                 return RuntimeSettings(**data)
         except Exception:
@@ -124,12 +136,12 @@ def save_settings(settings: RuntimeSettings):
         json.dump(settings.dict(), f, indent=2)
 
 
-def find_executable(name: str) -> Optional[str]:
+def find_executable(name: str) -> str | None:
     """Find executable in PATH."""
     return shutil.which(name)
 
 
-def get_version(cmd: List[str]) -> Optional[str]:
+def get_version(cmd: list[str]) -> str | None:
     """Get version from command."""
     try:
         result = subprocess.run(cmd, capture_output=True, text=True, timeout=5)
@@ -206,6 +218,7 @@ async def set_runtime_path(language: str, path: str):
 @router.post("/execute")
 async def execute_code(request: ExecuteRequest):
     """Execute code in the specified language."""
+    _require_code_execution()
     if request.language not in DEFAULT_RUNTIMES:
         raise HTTPException(status_code=400, detail=f"Unsupported language: {request.language}")
     
@@ -324,10 +337,13 @@ class AgentFileRequest(BaseModel):
 @router.post("/agent/execute")
 async def agent_execute(request: AgentCommandRequest):
     """Execute a shell command and return output."""
+    _require_code_execution()
     try:
+        command = shlex.split(request.command, posix=os.name != "nt")
+        if not command:
+            raise ValueError("Command cannot be empty")
         result = subprocess.run(
-            request.command,
-            shell=True,
+            command,
             capture_output=True,
             text=True,
             timeout=30,
@@ -347,6 +363,7 @@ async def agent_execute(request: AgentCommandRequest):
 @router.post("/agent/file")
 async def agent_file(request: AgentFileRequest):
     """Create or write files for the agent."""
+    _require_code_execution()
     try:
         if request.action == "mkdir":
             os.makedirs(request.path, exist_ok=True)
@@ -365,8 +382,9 @@ async def agent_file(request: AgentFileRequest):
 @router.get("/agent/read")
 async def agent_read(path: str):
     """Read a file for the agent."""
+    _require_code_execution()
     try:
-        with open(path, "r", encoding="utf-8") as f:
+        with open(path, encoding="utf-8") as f:
             content = f.read()
         return {"success": True, "content": content}
     except Exception as e:
@@ -376,6 +394,7 @@ async def agent_read(path: str):
 @router.get("/agent/list")
 async def agent_list(path: str):
     """List directory contents for the agent."""
+    _require_code_execution()
     try:
         items = []
         for entry in os.scandir(path):

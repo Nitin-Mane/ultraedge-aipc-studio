@@ -15,13 +15,13 @@ import sys
 import threading
 import time
 
+from app.config import settings
+
 logger = logging.getLogger("maintenance")
 
-APP_DATA = os.path.abspath(os.path.join(os.path.dirname(__file__), "..", "app_data"))
-TTS_DIR = os.path.join(APP_DATA, "tts")
-# Compiled-blob cache written by qwen2_5_omni_helper (see OV_CACHE_DIR there)
-OV_CACHE_DIR = os.path.abspath(os.path.join(
-    os.path.dirname(__file__), "..", "..", "..", "qwen2.5-omni-chatbot", "ov_cache"))
+APP_DATA = str(settings.APP_DATA_DIR)
+TTS_DIR = str(settings.APP_DATA_DIR / "tts")
+OV_CACHE_DIR = str(settings.OV_CACHE_DIR)
 
 TTS_MAX_AGE_S = 24 * 3600        # keep last day of synthesized audio replayable
 OV_CACHE_MAX_AGE_S = 7 * 24 * 3600  # recompiled blobs regenerate automatically

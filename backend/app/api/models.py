@@ -1,14 +1,14 @@
+
 from fastapi import APIRouter, HTTPException
 from pydantic import BaseModel
-from typing import Optional, List, Dict, Any
+
 from app.models.catalog import get_registry_models
-from app.models.jobs import queue_prepare_job, get_job_status
-from app.runtime.inference import RuntimeManager
+from app.models.jobs import queue_prepare_job
 
 router = APIRouter()
 
 class PrepareRequest(BaseModel):
-    precision: Optional[str] = "INT4"
+    precision: str | None = "INT4"
 
 @router.get("/catalog")
 async def get_model_catalog():

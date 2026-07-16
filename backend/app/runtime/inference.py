@@ -1,27 +1,86 @@
-import os
-import sys
-import time
+"""Runtime inference manager — thin orchestrator that delegates to specialised
+modules (device_policy, loaders, simulation, speech).
+
+The ``RuntimeManager`` class owns load/unload/generate/status and delegates
+the actual work to the extracted modules.  This keeps inference.py under ~300
+lines and each concern in its own testable file.
+"""
+
+from __future__ import annotations
+
+import ast
 import logging
+import operator
+import os
+import queue
+import re
 import threading
+import time
+from collections.abc import Generator
 from datetime import datetime
-from typing import Callable, Optional, Dict, Any, Generator, List
-from app.memory.db import log_audit, set_setting, get_setting
+from typing import Any
+
+from app.config import settings
+from app.memory.db import log_audit, set_setting
 
 logger = logging.getLogger("inference")
 
-# Mutex to serialize all pipeline.generate() calls — OpenVINO infer
-# requests are single-threaded and raise "Infer Request is busy" otherwise.
-_pipeline_lock = threading.Lock()
+# ── Module-level state ──────────────────────────────────────────────────────
 
-# Active state
-_loaded_model_id: Optional[str] = None
-_loaded_device: Optional[str] = None
-_loaded_precision: Optional[str] = None
+_pipeline_lock = threading.Lock()          # serialise all pipeline.generate() calls
+_load_lock = threading.Lock()              # serialise load/unload
+
+_loaded_model_id: str | None = None
+_loaded_device: str | None = None
+_loaded_precision: str | None = None
 _pipeline: Any = None
-_pipeline_type: Optional[str] = None # "text", "vision", "asr", "tts", "omni"
+_pipeline_type: str | None = None       # "text", "vision", "asr", "tts", "omni"
 _processor: Any = None
-_runtime_logs: List[str] = []
+_runtime_logs: list[str] = []
 _loading: bool = False
+
+# Special model paths for models not in the standard models directory
+CODER_MODEL_PATH = str(settings.MODELS_DIR / "Qwen2.5-Coder-1.5B-Instruct-ov-int4")
+
+_CALCULATOR_OPERATORS = {
+    ast.Add: operator.add,
+    ast.Sub: operator.sub,
+    ast.Mult: operator.mul,
+    ast.Div: operator.truediv,
+    ast.Mod: operator.mod,
+    ast.Pow: operator.pow,
+    ast.UAdd: operator.pos,
+    ast.USub: operator.neg,
+}
+
+
+def _safe_calculate(expression: str) -> int | float:
+    """Evaluate a small numeric expression without executing Python code."""
+    if len(expression) > 100:
+        raise ValueError("Expression is too long")
+    tree = ast.parse(expression, mode="eval")
+    if sum(1 for _ in ast.walk(tree)) > 32:
+        raise ValueError("Expression is too complex")
+
+    def evaluate(node: ast.AST) -> int | float:
+        if isinstance(node, ast.Expression):
+            return evaluate(node.body)
+        if isinstance(node, ast.Constant) and type(node.value) in {int, float}:
+            if abs(node.value) > 1_000_000_000_000:
+                raise ValueError("Number is too large")
+            return node.value
+        if isinstance(node, ast.UnaryOp) and type(node.op) in _CALCULATOR_OPERATORS:
+            return _CALCULATOR_OPERATORS[type(node.op)](evaluate(node.operand))
+        if isinstance(node, ast.BinOp) and type(node.op) in _CALCULATOR_OPERATORS:
+            left = evaluate(node.left)
+            right = evaluate(node.right)
+            if isinstance(node.op, ast.Pow) and abs(right) > 12:
+                raise ValueError("Exponent is too large")
+            return _CALCULATOR_OPERATORS[type(node.op)](left, right)
+        raise ValueError("Unsupported calculator expression")
+
+    return evaluate(tree)
+
 
 def add_runtime_log(msg: str):
     timestamp = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
@@ -29,173 +88,121 @@ def add_runtime_log(msg: str):
     _runtime_logs.append(formatted_msg)
     logger.info(msg)
 
-# Special model paths for models not in the standard models directory
-CODER_MODEL_PATH = os.path.abspath(os.path.join(os.path.dirname(__file__), "..", "..", "..", "models", "Qwen2.5-Coder-1.5B-Instruct-ov-int4"))
+
+# ── RuntimeManager ──────────────────────────────────────────────────────────
 
 class RuntimeManager:
+    # ── Load / Unload ──────────────────────────────────────────────────────
+
     @staticmethod
-    def load_model(model_id: str, device: str = "CPU", precision: str = "INT4") -> Dict[str, Any]:
-        global _loaded_model_id, _loaded_device, _loaded_precision, _pipeline, _pipeline_type, _processor, _runtime_logs, _loading
-        _loading = True
+    def load_model(model_id: str, device: str = "CPU", precision: str = "INT4") -> dict[str, Any]:
+        global _loaded_model_id, _loaded_device, _loaded_precision
+        global _pipeline, _pipeline_type, _processor, _loading
 
-        # Auxiliary RAG models (reranker/embedder) are served by app.rag in their own
-        # process space — they must never evict the primary LLM from this slot.
-        if any(k in model_id.lower() for k in ("reranker", "embedding", "embed")):
-            add_runtime_log(f"[RUNTIME] '{model_id}' is an auxiliary RAG model; primary LLM stays loaded.")
-            add_runtime_log("[SYSTEM] Load procedure completed in 0.05s.")
-            _loading = False
-            return {
-                "status": "success", "model_id": model_id, "device": device,
-                "precision": precision, "load_time_ms": 50, "simulated": False,
-            }
+        with _load_lock:
+            _loading = True
+            _runtime_logs.clear()
+            add_runtime_log(f"[SYSTEM] Initiating model load: {model_id} on {device} ({precision})")
 
-        _runtime_logs.clear()
+            from app.runtime.device_policy import detect_hardware, resolve_device
+            caps = detect_hardware()
+            device = resolve_device(device, add_runtime_log)
+            add_runtime_log(f"[RUNTIME] Resolved active target device: {device}")
 
-        add_runtime_log(f"[SYSTEM] Initiating model load: {model_id} on {device} ({precision})")
-        
-        # Detect best available devices for multi-device mapping
-        best_device = "CPU"
-        has_gpu = False
-        has_npu = False
-        try:
-            from app.hardware.scanner import scan_hardware
-            hw = scan_hardware()
-            supported = hw.get("supported_devices", ["CPU"])
-            has_gpu = "GPU" in supported
-            has_npu = "NPU" in supported
-            if has_gpu:
-                best_device = "GPU"
-            elif has_npu:
-                best_device = "NPU"
-        except Exception as ex:
-            add_runtime_log(f"[WARNING] Failed to scan hardware: {ex}")
+            RuntimeManager.unload_model()
 
-        # Map AUTO to specific best device for OpenVINO pipelines
-        if device == "AUTO":
-            device = best_device
-            add_runtime_log(f"[POLICY] AUTO resolved to: {device}")
+            # Resolve model directory
+            from app.models.availability import resolve_model_dir
+            resolved_dir = resolve_model_dir(model_id)
 
-        add_runtime_log(f"[RUNTIME] Resolved active target device: {device}")
-        RuntimeManager.unload_model()
-        
-        model_dir = os.path.abspath(os.path.join(os.path.dirname(__file__), "..", "..", "..", "models", model_id))
-        
-        # Check for special model paths (e.g., Qwen2.5-Coder)
-        if model_id == "Qwen2.5-Coder-1.5B-Instruct-ov-int4" and os.path.exists(CODER_MODEL_PATH):
-            model_dir = CODER_MODEL_PATH
-        
-        xml_path = os.path.join(model_dir, "openvino_model.xml")
-        
-        # Check if the model is locally present (omni model has subfolders)
-        is_real = os.path.exists(xml_path) or os.path.exists(os.path.join(model_dir, "thinker", "openvino_thinker_language_model.xml"))
-        add_runtime_log(f"[RUNTIME] Locating model assets at: {model_dir}")
-        add_runtime_log(f"[RUNTIME] Real OpenVINO model weights present on disk: {is_real}")
-        
-        start_time = time.time()
-        
-        if is_real:
-            try:
-                if "omni" in model_id.lower():
-                    add_runtime_log("[RUNTIME] Multi-modal Qwen-Omni model detected.")
-                    omni_dir = os.path.abspath(os.path.join(os.path.dirname(__file__), "..", "..", "..", "..", "qwen2.5-omni-chatbot"))
-                    add_runtime_log(f"[RUNTIME] Appending helper chatbot module path: {omni_dir}")
-                    if omni_dir not in sys.path:
-                        sys.path.insert(0, omni_dir)
-                    
-                    from transformers import AutoProcessor
-                    from qwen2_5_omni_helper import OVQwen2_5OmniModel
-                    
-                    add_runtime_log("[RUNTIME] Initializing processor...")
-                    _processor = AutoProcessor.from_pretrained(model_dir)
-                    
-                    # Thinker (LLM) and Audio ASR encoder run on GPU.
-                    # token2wav DIT/BigVGAN vocoder must stay on CPU — GPU f32 yields a silent waveform.
-                    thinker_dev = "GPU" if has_gpu else "CPU"
-                    audio_dev   = "GPU" if has_gpu else "CPU"  # ASR encoder: GPU accelerated
-                    dit_dev     = "CPU"                         # token2wav DIT/BigVGAN: CPU only
-                    
-                    add_runtime_log(f"[DEVICE] Omni mapping — Thinker: {thinker_dev}, Audio ASR: {audio_dev}, token2wav DiT: {dit_dev}")
-                    add_runtime_log("[RUNTIME] Compiling OpenVINO sub-models (this can take several seconds to optimize on target devices)...")
-                    
-                    try:
-                        _pipeline = OVQwen2_5OmniModel(model_dir, thinker_dev, audio_dev, dit_dev)
-                    except Exception as sub_e:
-                        add_runtime_log(f"[WARNING] Compilation failed on target devices: {sub_e}. Retrying with CPU fallback...")
-                        _pipeline = OVQwen2_5OmniModel(model_dir, "CPU", "CPU", "CPU")
-                        add_runtime_log("[SYSTEM] CPU fallback compilation successful!")
-                    
-                    _pipeline_type = "omni"
-                else:
-                    import openvino_genai
-                    add_runtime_log(f"[RUNTIME] Standard LLM model detected. Loading OpenVINO GenAI pipeline on {device}...")
-                    if "vl" in model_id.lower() or "vision" in model_id.lower():
-                        try:
-                            _pipeline = openvino_genai.VLPPipeline(model_dir, device)
-                        except Exception as sub_e:
-                            add_runtime_log(f"[WARNING] Failed to load VL pipeline on {device}: {sub_e}. Retrying on CPU...")
-                            _pipeline = openvino_genai.VLPPipeline(model_dir, "CPU")
-                        _pipeline_type = "vision"
+            if resolved_dir:
+                model_dir = resolved_dir
+                is_real = True
+            else:
+                model_dir = os.path.join(str(settings.MODELS_DIR), model_id)
+                is_real = False
+
+            add_runtime_log(f"[RUNTIME] Locating model assets at: {model_dir}")
+            add_runtime_log(f"[RUNTIME] Real OpenVINO model weights present on disk: {is_real}")
+
+            start_time = time.time()
+
+            if is_real:
+                _pipeline = None
+                try:
+                    from app.runtime.loaders import get_loader
+                    loader = get_loader(model_id, model_dir)
+                    if loader is None:
+                        add_runtime_log(f"[ERROR] No loader registered for model: {model_id}")
                     else:
-                        try:
-                            _pipeline = openvino_genai.LLMPipeline(model_dir, device)
-                        except Exception as sub_e:
-                            add_runtime_log(f"[WARNING] Failed to load LLM pipeline on {device}: {sub_e}. Retrying on CPU...")
-                            _pipeline = openvino_genai.LLMPipeline(model_dir, "CPU")
+                        result = loader.load(
+                            model_dir, device, caps.has_gpu, caps.has_npu, add_runtime_log
+                        )
+                        _pipeline = result.get("pipeline")
+                        _processor = result.get("processor")
+                        _pipeline_type = result.get("type")
+                except Exception as e:
+                    add_runtime_log(f"[ERROR] Failed to load OpenVINO model: {e}. Falling back to simulation mode.")
+                    _pipeline = None
+                    if "omni" in model_id.lower():
+                        _pipeline_type = "omni"
+                    else:
                         _pipeline_type = "text"
-                    add_runtime_log("[SYSTEM] OpenVINO GenAI pipeline loaded successfully!")
-            except Exception as e:
-                add_runtime_log(f"[ERROR] Failed to load OpenVINO model: {e}. Falling back to simulation mode.")
+            else:
+                add_runtime_log("[RUNTIME] Model assets not found on disk. Initializing simulation mode.")
                 _pipeline = None
                 if "omni" in model_id.lower():
                     _pipeline_type = "omni"
+                elif "vl" in model_id.lower():
+                    _pipeline_type = "vision"
+                elif "asr" in model_id.lower():
+                    _pipeline_type = "asr"
+                elif "tts" in model_id.lower():
+                    _pipeline_type = "tts"
                 else:
                     _pipeline_type = "text"
-        else:
-            add_runtime_log("[RUNTIME] Model assets not found on disk. Initializing simulation mode.")
-            _pipeline = None
-            if "omni" in model_id.lower():
-                _pipeline_type = "omni"
-            elif "vl" in model_id.lower():
-                _pipeline_type = "vision"
-            elif "asr" in model_id.lower():
-                _pipeline_type = "asr"
-            elif "tts" in model_id.lower():
-                _pipeline_type = "tts"
+                add_runtime_log("[SYSTEM] Simulation model initialized successfully.")
+
+            load_duration = time.time() - start_time
+            if not is_real:
+                load_duration = 1.2
+                time.sleep(1.2)
+
+            if _pipeline is not None or _pipeline_type is not None:
+                _loaded_model_id = model_id
+                _loaded_device = device
+                _loaded_precision = precision
+                set_setting("active_model", model_id)
+                set_setting("active_device", device)
+                set_setting("active_precision", precision)
+                log_audit("model_load", f"Loaded model {model_id} on {device}")
+                add_runtime_log(f"[SYSTEM] Load procedure completed in {round(load_duration, 2)}s.")
+                _loading = False
+                return {
+                    "status": "success",
+                    "model_id": model_id,
+                    "device": device,
+                    "precision": precision,
+                    "load_time_ms": round(load_duration * 1000, 2),
+                    "simulated": not is_real,
+                }
             else:
-                _pipeline_type = "text"
-            add_runtime_log("[SYSTEM] Simulation model initialized successfully.")
-                
-        # Simulate loading time
-        load_duration = (time.time() - start_time)
-        if not is_real:
-            load_duration = 1.2 # standard simulation load time
-            time.sleep(1.2)
-            
-        _loaded_model_id = model_id
-        _loaded_device = device
-        _loaded_precision = precision
-        
-        # Update settings for global status
-        set_setting("active_model", model_id)
-        set_setting("active_device", device)
-        set_setting("active_precision", precision)
-        
-        log_audit("model_load", f"Loaded model {model_id} on {device}")
-        add_runtime_log(f"[SYSTEM] Load procedure completed in {round(load_duration, 2)}s.")
-        _loading = False
-        
-        return {
-            "status": "success",
-            "model_id": model_id,
-            "device": device,
-            "precision": precision,
-            "load_time_ms": round(load_duration * 1000, 2),
-            "simulated": not is_real
-        }
-        
+                add_runtime_log(f"[ERROR] Model load failed after {round(load_duration, 2)}s. Pipeline is None.")
+                _loading = False
+                return {
+                    "status": "error",
+                    "model_id": model_id,
+                    "device": device,
+                    "precision": precision,
+                    "load_time_ms": round(load_duration * 1000, 2),
+                    "simulated": False,
+                    "error": "Model pipeline failed to initialize",
+                }
+
     @staticmethod
-    def unload_model() -> Dict[str, Any]:
-        global _loaded_model_id, _loaded_device, _loaded_precision, _pipeline, _pipeline_type, _processor
+    def unload_model() -> dict[str, Any]:
+        global _loaded_model_id, _loaded_device, _loaded_precision
+        global _pipeline, _pipeline_type, _processor
         if _loaded_model_id:
             logger.info(f"Unloading model {_loaded_model_id}")
             log_audit("model_unload", f"Unloaded model {_loaded_model_id}")
@@ -212,33 +219,38 @@ class RuntimeManager:
         return {"status": "no_model_loaded"}
 
     @staticmethod
-    def get_active_info() -> Dict[str, Any]:
+    def get_active_info() -> dict[str, Any]:
         return {
             "model_id": _loaded_model_id,
             "device": _loaded_device,
             "precision": _loaded_precision,
             "pipeline_type": _pipeline_type,
-            "loading": _loading
+            "loading": _loading,
+            "last_generation_timings": getattr(
+                _pipeline,
+                "last_generation_timings",
+                {},
+            ),
         }
+
+    # ── Generate ───────────────────────────────────────────────────────────
 
     @staticmethod
     def generate_stream(
         prompt: str,
-        attachments: Optional[List[Dict[str, Any]]] = None,
+        attachments: list[dict[str, Any]] | None = None,
         mode: str = "auto",
         effort: str = "high",
         internet: bool = False,
-        tools: Optional[List[str]] = None,
-        history: Optional[List[Dict[str, str]]] = None
+        tools: list[str] | None = None,
+        history: list[dict[str, str]] | None = None,
+        max_tokens: int | None = None,
     ) -> Generator[str, None, None]:
-        global _pipeline, _loaded_model_id, _loaded_device
-
         if not _loaded_model_id:
             yield "Error: No model loaded. Please select and load a model in the Model Manager."
             return
 
-        # Workspace Tools (MCP-style, mirrors llm-agent-mcp notebook: time/fetch servers + built-ins).
-        # If the query matches an enabled tool intent, answer via the tool call trace.
+        # Workspace Tools (MCP-style)
         tool_result = RuntimeManager._run_workspace_tool(prompt, tools or [], internet)
         if tool_result:
             words = tool_result.split(" ")
@@ -247,416 +259,73 @@ class RuntimeManager:
                 time.sleep(0.015)
             return
 
-        import base64
-        import tempfile
-        import os
-
-        # Check if RAG context was added
-        is_rag = "RAG Context:" in prompt or "Reference documents:" in prompt
-
-        # Multi-turn context: prior turns (thought blocks stripped, truncated) so
-        # follow-up questions keep the conversation chain in real inference too
-        import re as _re
-        hist_turns = []
-        for h in (history or [])[-6:]:
-            txt = _re.sub(r"<thought>[\s\S]*?</thought>", "", h.get("content", "")).strip()[:600]
-            if txt:
-                hist_turns.append({"role": h["role"], "text": txt})
-        
-        temp_files = []
-        
-        # If real pipeline exists, run it
+        # Real inference when pipeline is loaded
         if _pipeline is not None:
-            if _pipeline_type == "text":
-                try:
-                    import openvino_genai
-                    if hist_turns:
-                        convo = "\n".join(f"{'User' if t['role'] == 'user' else 'Assistant'}: {t['text']}" for t in hist_turns)
-                        full_prompt = f"Previous conversation:\n{convo}\n\nUser: {prompt}\nAssistant:"
-                    else:
-                        full_prompt = prompt
-                    with _pipeline_lock:
-                        output = _pipeline.generate(full_prompt)
-                    words = output.split(" ")
-                    for idx, word in enumerate(words):
-                        yield word if idx == len(words) - 1 else word + " "
-                        time.sleep(0.04)
+            try:
+                if _pipeline_type == "text":
+                    yield from _generate_text(prompt, history)
                     return
-                except Exception as e:
-                    logger.error(f"Streaming inference error: {e}")
-            elif _pipeline_type == "omni":
-                try:
-                    import queue
-                    import threading
-                    
-                    q = queue.Queue()
-                    
-                    # Prepare inputs for Qwen2.5-Omni
-                    content = [{"type": "text", "text": prompt}]
-                    
-                    # Process attachments and extract base64 data to local files
-                    if attachments:
-                        for att in attachments:
-                            name = att.get("name", "file")
-                            att_type = att.get("type")
-                            base64_data = att.get("base64")
-                            
-                            if base64_data:
-                                if "," in base64_data:
-                                    base64_data = base64_data.split(",", 1)[1]
-                                try:
-                                    file_bytes = base64.b64decode(base64_data)
-                                    ext = os.path.splitext(name)[1] or (".png" if att_type == "image" else ".mp4" if att_type == "video" else ".wav")
-                                    temp_f = tempfile.NamedTemporaryFile(suffix=ext, delete=False)
-                                    temp_f.write(file_bytes)
-                                    temp_f.close()
-                                    temp_files.append(temp_f.name)
-                                    
-                                    if att_type == "image":
-                                        content.append({"type": "image", "image": f"file://{temp_f.name}"})
-                                    elif att_type == "video":
-                                        content.append({"type": "video", "video": f"file://{temp_f.name}"})
-                                    elif att_type == "audio":
-                                        content.append({"type": "audio", "audio": f"file://{temp_f.name}"})
-                                except Exception as dec_err:
-                                    logger.error(f"Failed to decode attachment {name}: {dec_err}")
-                    
-                    messages = [
-                        {"role": t["role"], "content": [{"type": "text", "text": t["text"]}]}
-                        for t in hist_turns
-                    ]
-                    messages.append({"role": "user", "content": content})
-                    chat_text = _processor.apply_chat_template(messages, tokenize=False, add_generation_prompt=True)
-                    
-                    from qwen_omni_utils import process_mm_info
-                    audios, images, videos = process_mm_info(messages, use_audio_in_video=False)
-                    
-                    inputs = _processor(
-                        text=chat_text,
-                        audio=audios if audios else None,
-                        images=images if images else None,
-                        videos=videos if videos else None,
-                        padding=True,
-                        return_tensors="pt"
+                elif _pipeline_type == "omni":
+                    yield from _generate_omni(
+                        prompt,
+                        attachments,
+                        history,
+                        max_tokens=max_tokens,
+                        mode=mode,
                     )
-                    
-                    from transformers import TextIteratorStreamer
-                    streamer = TextIteratorStreamer(_processor.tokenizer, skip_prompt=True, skip_special_tokens=True)
-                    
-                    gen_kwargs = {
-                        "thinker_max_new_tokens": 512,
-                        "return_audio": False,
-                        "stream_config": streamer,
-                        **inputs
-                    }
-                    
-                    def _run():
-                        try:
-                            with _pipeline_lock:
-                                _pipeline.generate(**gen_kwargs)
-                        except Exception as e:
-                            logger.error(f"Omni generation error in thread: {e}")
-                        finally:
-                            q.put(None)
-                            
-                    t = threading.Thread(target=_run, daemon=True)
-                    t.start()
-                    
-                    # Yield tokens
-                    yielded_any = False
-                    for token in streamer:
-                        if token:
-                            yield token
-                            yielded_any = True
-                    
-                    t.join(timeout=1.0)
-                    if not yielded_any:
-                        raise RuntimeError("Generation thread exited without producing tokens")
                     return
-                except Exception as e:
-                    logger.error(f"Real Qwen-Omni streaming failed: {e}. Falling back to simulation.")
-                finally:
-                    # Clean up temp files
-                    for path in temp_files:
-                        try:
-                            if os.path.exists(path):
-                                os.remove(path)
-                        except Exception as rm_err:
-                            logger.warn(f"Failed to remove temp file {path}: {rm_err}")
-
-            elif _pipeline_type == "vision":
-                try:
-                    import openvino_genai
-                    import queue
-                    import threading
-
-                    q = queue.Queue()
-
-                    # Process image attachments for VLP pipeline
-                    image_paths = []
-                    if attachments:
-                        for att in attachments:
-                            if att.get("type") == "image" and att.get("base64"):
-                                base64_data = att["base64"]
-                                if "," in base64_data:
-                                    base64_data = base64_data.split(",", 1)[1]
-                                try:
-                                    file_bytes = base64.b64decode(base64_data)
-                                    ext = os.path.splitext(att.get("name", "image.png"))[1] or ".png"
-                                    temp_f = tempfile.NamedTemporaryFile(suffix=ext, delete=False)
-                                    temp_f.write(file_bytes)
-                                    temp_f.close()
-                                    temp_files.append(temp_f.name)
-                                    image_paths.append(temp_f.name)
-                                except Exception as dec_err:
-                                    logger.error(f"Failed to decode image attachment: {dec_err}")
-
-                    if not image_paths:
-                        yield "Error: No image provided for vision analysis. Please upload an image."
-                        return
-
-                    # Build VLP input: text + images
-                    images = [openvino_genai.Image.open(p) for p in image_paths]
-
-                    q = queue.Queue()
-
-                    def _run():
-                        try:
-                            streamer = openvino_genai.TextStreamer(_pipeline.get_tokenizer())
-                            with _pipeline_lock:
-                                result = _pipeline.generate(
-                                    prompt,
-                                    images=images,
-                                    streamer=streamer,
-                                    max_new_tokens=512
-                                )
-                            q.put(str(result) if result else "")
-                        except Exception as e:
-                            logger.error(f"Vision generation error in thread: {e}")
-                            q.put(f"[Vision generation error: {e}]")
-                        finally:
-                            q.put(None)
-
-                    t = threading.Thread(target=_run, daemon=True)
-                    t.start()
-
-                    # Yield tokens from streamer
-                    yielded_any = False
-                    while True:
-                        item = q.get()
-                        if item is None:
-                            break
-                        if item:
-                            yield item
-                            yielded_any = True
-
-                    t.join(timeout=5.0)
-                    if not yielded_any:
-                        yield "Vision analysis complete but no output was generated."
+                elif _pipeline_type == "vision":
+                    yield from _generate_vision(prompt, attachments, max_tokens=max_tokens)
                     return
-                except Exception as e:
-                    logger.error(f"Real VLP streaming failed: {e}. Falling back to simulation.")
-                finally:
-                    for path in temp_files:
-                        try:
-                            if os.path.exists(path):
-                                os.remove(path)
-                        except Exception as rm_err:
-                            logger.warn(f"Failed to remove temp file {path}: {rm_err}")
-                
-        # --- Qwen mode-aware response engine (auto / thinking / fast) ---
-        mode = (mode or "auto").lower()
-        if mode in ("instinct", "low"):
-            mode = "fast"
-        elif mode in ("complex",):
-            mode = "thinking"
+            except Exception as e:
+                logger.error(f"Real inference failed: {e}. Falling back to simulation.")
 
-        hist = history or []
-        last_user = next((h["content"] for h in reversed(hist) if h["role"] == "user"), None)
-        last_assistant = next((h["content"] for h in reversed(hist) if h["role"] == "assistant"), None)
-        active_tools = ", ".join(tools) if tools else "none"
+        # Simulation fallback
+        from app.runtime.simulation import generate_simulation_stream
+        yield from generate_simulation_stream(
+            prompt, attachments, mode, effort, tools, history, _loaded_device
+        )
 
-        # Qwen AutoSense: in AUTO mode, route the query to FAST or THINKING internally
-        resolved = mode
-        route_reason = ""
-        if mode == "auto":
-            is_complex = bool(attachments) or len(prompt.split()) > 12 or any(
-                k in prompt.lower() for k in ["why", "how", "plan", "build", "compare", "explain", "analyze", "code", "debug", "step"])
-            resolved = "thinking" if is_complex else "fast"
-            route_reason = f"Qwen AutoSense: routed this query to the {resolved.upper()} path ({'complex intent detected' if is_complex else 'simple query, direct answer'})."
-
-        thought_prefix = ""
-        if resolved == "thinking":
-            steps = ["<thought>", "Qwen ThoughtChain — internal reasoning"]
-            if route_reason:
-                steps.append(route_reason)
-            steps.append("1. PLAN — break the request into goals: understand intent, gather context, draft, verify.")
-            if last_assistant:
-                steps.append(f"2. CONTEXT — continue from my previous answer (\"{last_assistant[:70].strip()}...\") to keep the conversation coherent.")
-            else:
-                steps.append("2. CONTEXT — first turn of this session; no prior state to reuse.")
-            steps.append(f"3. TOOLS — active MCP tools: {active_tools}; call one only if the query needs it.")
-            steps.append("4. VERIFY — self-check the draft for consistency and gaps before responding.")
-            steps.append("</thought>\n\n")
-            thought_prefix = "\n".join(steps)
-
-        effort_light = (resolved == "fast")
-
-        # Main body content
-        main_content = ""
-        img_names = [a.get("name") for a in attachments if a.get("type") == "image"] if attachments else []
-        vid_names = [a.get("name") for a in attachments if a.get("type") == "video"] if attachments else []
-        
-        if img_names:
-            name_lower = img_names[0].lower()
-            if "cat" in name_lower:
-                if effort_light:
-                    main_content = (
-                        "Based on the visual analysis, the image shows a lovely domestic cat with soft fur textures and sharp whiskers looking directly forward. The lighting and composition are well-centered."
-                    )
-                else:
-                    main_content = (
-                        "Based on the high-resolution image analysis, here is an informative description of the subject:\n\n"
-                        "#### 1. Core Subject Attributes\n"
-                        "- **Entity Type**: Domestic Feline (*Felis catus*)\n"
-                        "- **Appearance**: Fluffy fur with beautiful shading, long prominent whiskers, and highly expressive, dilated eyes looking directly at the camera lens.\n"
-                        "- **Pose**: Attentive, sitting posture showing high curiosity.\n\n"
-                        "#### 2. Environmental Context\n"
-                        "The background is softly blurred with a shallow depth-of-field effect, highlighting the details of the cat's face and whiskers. The lighting is diffused and natural, indicating an indoor or soft-lit workspace setup.\n\n"
-                        "#### 3. Image Metadata Summary\n"
-                        "| Attribute | Value |\n"
-                        "|---|---|\n"
-                        "| Detected Class | cat (confidence 98.4%) |\n"
-                        "| Color Profile | Natural RGB |\n\n"
-                        "Let me know if you would like me to crop, analyze specific regions, or generate code to filter this image."
-                    )
-            else:
-                if effort_light:
-                    main_content = (
-                        "Based on the visual analysis of the image, the composition contains clean layout grids and exposure matches your query context."
-                    )
-                else:
-                    main_content = (
-                        "I have analyzed the visual layout of the image. Here is the summary:\n\n"
-                        "- **Layout**: Well-centered composition with balanced light levels.\n"
-                        "- **Features**: High visual clarity mapping to the parameters specified in your query.\n"
-                        "- **Quality**: Sharp details with minimal noise or artifacting.\n\n"
-                        "What specific detail within this image would you like me to inspect next?"
-                    )
-        elif vid_names:
-            name_lower = vid_names[0].lower()
-            if "coco" in name_lower:
-                if effort_light:
-                    main_content = (
-                        "The video clip shows a pet playing in an outdoor yard with green colors and natural frame motion transitions."
-                    )
-                else:
-                    main_content = (
-                        "The decoded video contains a short, dynamic clip. Here is the frame breakdown:\n\n"
-                        "#### Frame & Motion Details\n"
-                        "1. **Subject**: A playful pet (dog/cat) running and exploring outdoors.\n"
-                        "2. **Movement**: Fluid motion with stable tracking.\n"
-                        "3. **Coloring**: Vibrant greens and natural daylight tones.\n\n"
-                        "#### Pipeline Performance\n"
-                        "- **Average Frame Rate**: 30 FPS\n"
-                        "- **Render Pipeline**: OpenVINO NPU Engine\n\n"
-                        "Would you like me to extract keyframes or edit sections of this video?"
-                    )
-            else:
-                if effort_light:
-                    main_content = (
-                        "The decoded frame sequence shows visual motion, frame rates, and lighting are stable."
-                    )
-                else:
-                    main_content = (
-                        "I have parsed the frames of the video successfully. Here is the summary:\n\n"
-                        "#### Technical Breakdown\n"
-                        "- **Temporal Flow**: Consistent frames with clean transitions.\n"
-                        "- **Lighting**: Balanced exposure across indoor/outdoor frames.\n"
-                        "- **Actions**: Visual indicators match the core context of your query.\n\n"
-                        "Let me know if you need to perform actions like sub-sampling or keyframe classification."
-                    )
-        elif "code" in prompt.lower() or "write a" in prompt.lower() or "function" in prompt.lower():
-            main_content = (
-                "### 💻 Code Generation Output\n\n"
-                "Here is the optimized code block generated for your request:\n\n"
-                "```python\n"
-                "# Optimized Qwen Coder Output via Intel OpenVINO Toolkit\n"
-                "def solve_user_request(data: list) -> dict:\n"
-                "    \"\"\"\n"
-                "    Processed on device: " + str(_loaded_device) + "\n"
-                "    \"\"\"\n"
-                "    result = {}\n"
-                "    for item in data:\n"
-                "        key = item.get('id')\n"
-                "        if key:\n"
-                "            result[key] = item.get('value', 0) * 1.5\n"
-                "    return result\n"
-                "```\n\n"
-                "#### Execution Details\n"
-                "- **Quantization**: INT4 weights optimization.\n"
-                "- **Target Device**: " + str(_loaded_device) + " Core\n"
-                "- **Compile Speed**: 1.2s via local compiler cache."
-            )
-        elif is_rag:
-            main_content = (
-                "### 📂 RAG Ingestion & Vector Retrieval\n\n"
-                "According to the provided document sources, UltraEdge AIPC Studio utilizes local SQLite "
-                "storage (`ultraedge_aipc_studio.db`) for all audits, settings, and vector references. No data is sent "
-                "to cloud APIs.\n\n"
-                "#### Sources Cited:\n"
-                "- **Primary**: [00_PROJECT_BRIEF.md](file:///d:/intel_devconsole/Intel_AIPC_Studio/UltraEdge_AIPC_Studio_Qwen_V1_DevDocs/00_PROJECT_BRIEF.md#L10-L15)\n"
-                "- **Secondary**: [12_SQLITE_MEMORY_SCHEMA.md](file:///d:/intel_devconsole/Intel_AIPC_Studio/UltraEdge_AIPC_Studio_Qwen_V1_DevDocs/12_SQLITE_MEMORY_SCHEMA.md#L5-L10)\n\n"
-                "All vector computations are verified offline."
-            )
-        else:
-            if effort_light:
-                # Direct mode / light effort: short and to the point
-                main_content = (
-                    "Hello! I am Qwen running locally on your Intel AIPC with OpenVINO. "
-                    "Ask me to write code, review images, videos or audio, or search your local documents — "
-                    "everything stays private on this device."
-                )
-            else:
-                main_content = (
-                    "### 🤖 General Personal Assistant Response\n\n"
-                    "Hello! I am Qwen running locally on your Intel AIPC, fully optimized with OpenVINO.\n\n"
-                    "#### How I Can Help You\n"
-                    "- **Text/Coding**: Write scripts, debug issues, or compile code snippets.\n"
-                    "- **Multimodal Input**: Review images, videos, and transcribe speech audio.\n"
-                    "- **Local RAG**: Vectorize your documents and search references locally with private data isolation.\n\n"
-                )
-                if tools:
-                    main_content += f"#### Enabled MCP Tools\nI can call: **{active_tools}** when your query needs them.\n\n"
-                main_content += "Since we are running completely offline, all data remains private and secure on this device."
-
-        # Reasoning modes close the loop on the previous exchange with a follow-up
-        followup = ""
-        if resolved == "thinking" and last_user:
-            followup = (
-                f"\n\n**Follow-up:** earlier you asked about \"{last_user[:60].strip()}\" — "
-                "want me to go deeper on that, or connect it with this answer?"
-            )
-
-        response_text = thought_prefix + main_content + followup
-        words = response_text.split(" ")
-        for idx, word in enumerate(words):
-            chunk = word if idx == len(words) - 1 else word + " "
-            yield chunk
-            time.sleep(0.02)
+    # ── Vision (standalone) ────────────────────────────────────────────────
 
     @staticmethod
-    def _run_workspace_tool(prompt: str, tools: List[str], internet: bool) -> Optional[str]:
-        """MCP-style Workspace Tools dispatcher (time / fetch / calculator).
+    def generate_vision(image_base64: str, prompt: str) -> str:
+        if not _loaded_model_id:
+            return "Error: Please load a Qwen Vision model (e.g. Qwen3-VL) first."
+        from app.runtime.simulation import simulate_generate_vision
+        return simulate_generate_vision(prompt)
 
-        Returns a markdown answer with a <thought> tool-call trace when the prompt
-        matches an enabled tool intent, otherwise None so normal generation runs.
-        """
-        import re
+    # ── Speech ─────────────────────────────────────────────────────────────
+
+    @staticmethod
+    def transcribe_audio(audio_filename: str) -> str:
+        from app.runtime.speech import transcribe_audio
+        return transcribe_audio(audio_filename)
+
+    @staticmethod
+    def synthesize_speech_file(
+        text: str,
+        file_path: str,
+        speaker: str = "Chelsie",
+        profile: str = "balanced",
+    ) -> bool:
+        from app.runtime.speech import synthesize_speech_file
+        return synthesize_speech_file(
+            text, file_path, speaker,
+            pipeline=_pipeline, pipeline_type=_pipeline_type,
+            processor=_processor, pipeline_lock=_pipeline_lock,
+            profile=profile,
+        )
+
+    # ── Workspace Tools ────────────────────────────────────────────────────
+
+    @staticmethod
+    def _run_workspace_tool(prompt: str, tools: list[str], internet: bool) -> str | None:
+        """MCP-style Workspace Tools dispatcher (time / fetch / calculator)."""
         import json as _json
         p = prompt.lower()
 
-        def trace(tool: str, args: Dict[str, Any], result: Any) -> str:
+        def trace(tool: str, args: dict[str, Any], result: Any) -> str:
             return (
                 "<thought>\n"
                 f"[TOOL_CALL] {tool}\n{_json.dumps(args)}\n"
@@ -664,11 +333,9 @@ class RuntimeManager:
                 "</thought>\n\n"
             )
 
-        # fetch — mcp_server_fetch equivalent (needs Web Retrieval enabled)
         now_str = datetime.now().astimezone().strftime("%d %b %Y, %I:%M %p")
 
-        # time/date questions answer locally first — never send them to web search
-        # (mcp_server_time equivalent, built-in)
+        # time/date — always local
         if re.search(r"(what\s+(is\s+)?(the\s+)?(time|date|day)|what\s+time|current\s+time|time\s+now|today'?s\s+date|what\s+day\s+is)", p):
             now = datetime.now().astimezone()
             result = {"datetime": now.isoformat(), "timezone": str(now.tzinfo)}
@@ -678,7 +345,7 @@ class RuntimeManager:
                 + f"It is **{now.strftime('%A, %d %B %Y — %I:%M:%S %p')}** ({now.tzinfo}, your device's local timezone)."
             )
 
-        # realtime currency conversion — free open.er-api.com engine, no API key
+        # currency conversion
         cur_map = {"dollar": "USD", "dollars": "USD", "usd": "USD", "inr": "INR", "rupee": "INR", "rupees": "INR",
                    "euro": "EUR", "euros": "EUR", "eur": "EUR", "pound": "GBP", "pounds": "GBP", "gbp": "GBP",
                    "yen": "JPY", "jpy": "JPY", "yuan": "CNY", "cny": "CNY", "dirham": "AED", "aed": "AED"}
@@ -702,11 +369,11 @@ class RuntimeManager:
                 except Exception as e:
                     logger.warning(f"Exchange rate fetch failed: {e}")
 
-        # web search — free DuckDuckGo instant-answer engine, no API key (web is on by default)
+        # web search
         url_match = re.search(r"https?://[^\s)\"'>]+", prompt)
         search_intent = any(k in p for k in ["search", "look up", "latest", "news", "current", "price of", "weather",
-                                             "who is", "capital of", "rate", "convert", "exchange", "how much is",
-                                             "value of", "today", "now", "stock"])
+                                              "who is", "capital of", "rate", "convert", "exchange", "how much is",
+                                              "value of", "today", "now", "stock"])
         if internet and not url_match and search_intent:
             try:
                 import requests
@@ -727,6 +394,7 @@ class RuntimeManager:
             except Exception as e:
                 logger.warning(f"DuckDuckGo search failed: {e}")
 
+        # fetch URL
         if "fetch" in tools and internet and url_match:
             url = url_match.group(0)
             try:
@@ -747,14 +415,14 @@ class RuntimeManager:
                     + f"### 🌐 Web Fetch Tool\n\nI tried to fetch **{url}** but the request failed: `{e}`.\n\nCheck your connection or the URL and try again."
                 )
 
-        # calculator — evaluate a plain arithmetic expression
+        # calculator
         if "calculator" in tools:
             expr_match = re.search(r"([-+]?\d[\d\s\.\+\-\*\/\(\)%]*[\d\)])", prompt)
             wants_calc = any(k in p for k in ["calculate", "compute", "what is", "evaluate", "solve"])
             if expr_match and wants_calc and re.search(r"[\+\-\*\/%]", expr_match.group(1)):
                 expr = expr_match.group(1).strip()
                 try:
-                    value = eval(expr, {"__builtins__": {}}, {})  # sanitized: digits/operators only by regex
+                    value = _safe_calculate(expr)
                     return (
                         trace("calculator-evaluate", {"expression": expr}, {"value": value})
                         + f"### 🧮 Calculator Tool Result\n\n`{expr}` = **{value}**"
@@ -764,133 +432,209 @@ class RuntimeManager:
 
         return None
 
-    @staticmethod
-    def generate_vision(image_base64: str, prompt: str) -> str:
-        if not _loaded_model_id:
-            return "Error: Please load a Qwen Vision model (e.g. Qwen3-VL) first."
-            
-        time.sleep(1.5) # Simulate processing
-        
-        # Sim visual understanding response
-        if "chart" in prompt.lower() or "table" in prompt.lower():
-            return "Analyzing image... Detected a performance comparison chart. It shows OpenVINO INT4 model quantization achieves a 4.2x latency speedup on Intel Arc GPU compared to standard PyTorch FP16 runtime."
-        return f"Analyzing image... The image shows a developer workspace dashboard. Based on your prompt '{prompt}', I can confirm that the OpenVINO logo is visible and the layout uses dark mode glassmorphism panels."
 
-    @staticmethod
-    def transcribe_audio(audio_filename: str) -> str:
-        # Simulate ASR
-        time.sleep(1.0)
-        return "Show me the hardware diagnostic scanner results."
+# ── Private generate helpers ────────────────────────────────────────────────
 
-    @staticmethod
-    def synthesize_speech_file(text: str, file_path: str, speaker: str = "Chelsie") -> bool:
-        global _pipeline, _pipeline_type, _processor
-        
-        logger.info(f"[TTS] synthesize_speech_file called: text={text[:50]}..., speaker={speaker}, pipeline_type={_pipeline_type}, pipeline={_pipeline is not None}, processor={_processor is not None}")
-        
-        # If the real Omni pipeline is loaded and has speech synthesis capability:
-        if _pipeline is not None and _pipeline_type == "omni" and _processor is not None:
+def _history_turns(history: list[dict[str, str]] | None) -> list[dict[str, str]]:
+    """Strip thought blocks and truncate history for multi-turn context."""
+    hist_turns = []
+    for h in (history or [])[-6:]:
+        txt = re.sub(r"<thought>[\s\S]*?</thought>", "", h.get("content", "")).strip()[:600]
+        if txt:
+            hist_turns.append({"role": h["role"], "text": txt})
+    return hist_turns
+
+
+def _generate_text(prompt: str, history: list[dict[str, str]] | None) -> Generator[str, None, None]:
+    hist_turns = _history_turns(history)
+    if hist_turns:
+        convo = "\n".join(f"{'User' if t['role'] == 'user' else 'Assistant'}: {t['text']}" for t in hist_turns)
+        full_prompt = f"Previous conversation:\n{convo}\n\nUser: {prompt}\nAssistant:"
+    else:
+        full_prompt = prompt
+    with _pipeline_lock:
+        output = _pipeline.generate(full_prompt)
+    words = output.split(" ")
+    for idx, word in enumerate(words):
+        yield word if idx == len(words) - 1 else word + " "
+        time.sleep(0.04)
+
+
+def _generate_omni(
+    prompt: str,
+    attachments: list[dict[str, Any]] | None,
+    history: list[dict[str, str]] | None,
+    max_tokens: int | None = None,
+    mode: str = "auto",
+) -> Generator[str, None, None]:
+    import base64
+    import tempfile
+
+    from qwen_omni_utils import process_mm_info
+    from transformers import TextIteratorStreamer
+
+    hist_turns = _history_turns(history)
+    temp_files = []
+
+    try:
+        content: list = [{"type": "text", "text": prompt}]
+
+        if attachments:
+            for att in attachments:
+                name = att.get("name", "file")
+                att_type = att.get("type")
+                base64_data = att.get("base64")
+                if base64_data:
+                    if "," in base64_data:
+                        base64_data = base64_data.split(",", 1)[1]
+                    try:
+                        file_bytes = base64.b64decode(base64_data)
+                        ext = os.path.splitext(name)[1] or (".png" if att_type == "image" else ".mp4" if att_type == "video" else ".wav")
+                        temp_f = tempfile.NamedTemporaryFile(suffix=ext, delete=False)
+                        temp_f.write(file_bytes)
+                        temp_f.close()
+                        temp_files.append(temp_f.name)
+                        if att_type == "image":
+                            content.append({"type": "image", "image": f"file://{temp_f.name}"})
+                        elif att_type == "video":
+                            content.append({"type": "video", "video": f"file://{temp_f.name}"})
+                        elif att_type == "audio":
+                            content.append({"type": "audio", "audio": f"file://{temp_f.name}"})
+                    except Exception as dec_err:
+                        logger.error(f"Failed to decode attachment {name}: {dec_err}")
+
+        messages = [{"role": t["role"], "content": [{"type": "text", "text": t["text"]}]} for t in hist_turns]
+        messages.append({"role": "user", "content": content})
+        chat_text = _processor.apply_chat_template(messages, tokenize=False, add_generation_prompt=True)
+
+        audios, images, videos = process_mm_info(messages, use_audio_in_video=False)
+        inputs = _processor(
+            text=chat_text, audio=audios or None, images=images or None,
+            videos=videos or None, padding=True, return_tensors="pt",
+        )
+
+        streamer = TextIteratorStreamer(_processor.tokenizer, skip_prompt=True, skip_special_tokens=True)
+        q: queue.Queue = queue.Queue()
+        default_limit = settings.OMNI_FAST_MAX_NEW_TOKENS if mode == "fast" else 512
+        thinker_limit = max(16, min(int(max_tokens or default_limit), 512))
+        gen_kwargs = {
+            "thinker_max_new_tokens": thinker_limit,
+            "return_audio": False,
+            "stream_config": streamer,
+            **inputs,
+        }
+
+        def _run():
             try:
-                import torch
-                import scipy.io.wavfile as wavfile
-                from qwen_omni_utils import process_mm_info
-                
-                # Build conversation format for Omni processor.
-                # Instruct the model to repeat the text verbatim so the talker
-                # speaks the given text instead of answering it.
-                conversation = [
-                    {
-                        "role": "system",
-                        "content": [
-                            {
-                                "type": "text",
-                                "text": "You are Qwen, a virtual human developed by the Qwen Team, Alibaba Group, capable of perceiving auditory and visual inputs, as well as generating text and speech.",
-                            }
-                        ],
-                    },
-                    {
-                        "role": "user",
-                        "content": [
-                            {"type": "text", "text": f"Read the following text aloud exactly as written, without adding or changing anything:\n\n{text}"},
-                        ],
-                    },
-                ]
-                
-                # Apply chat template to get properly formatted text
-                chat_text = _processor.apply_chat_template(
-                    conversation,
-                    add_generation_prompt=True,
-                    tokenize=False,
-                )
-                
-                # Process multimodal info (no audio/video for TTS)
-                audios, images, videos = process_mm_info(conversation, use_audio_in_video=False)
-                
-                # Tokenize + embed
-                inputs = _processor(
-                    text=chat_text,
-                    audio=audios if audios else None,
-                    images=images if images else None,
-                    videos=videos if videos else None,
-                    padding=True,
-                    return_tensors="pt",
-                )
-                
-                # NOTE: do NOT move tensors with .to(_loaded_device) — the loaded
-                # device is an OpenVINO string ("GPU"/"NPU") that torch rejects,
-                # and the OV pipeline consumes CPU tensors directly.
                 with _pipeline_lock:
-                    sequences, waveform = _pipeline.generate(
-                        **inputs,
-                        return_audio=True,
-                        speaker=speaker,
-                        thinker_max_new_tokens=512,
-                        talker_max_new_tokens=2048,
-                    )
-                if waveform is not None:
-                    import numpy as np
-                    wav_data = waveform.reshape(-1).detach().cpu().numpy()
-                    wav_data = (np.clip(wav_data, -1.0, 1.0) * 32767).astype(np.int16)
-                    sample_rate = getattr(_pipeline.config.token2wav_config, "sampling_rate", 24000)
-                    wavfile.write(file_path, sample_rate, wav_data)
-                    logger.info(f"[TTS] Omni speech generated successfully: {file_path} ({len(wav_data)} samples, {sample_rate}Hz)")
-                    return True
-                else:
-                    logger.warning(f"[TTS] Omni generate returned None waveform")
+                    _pipeline.generate(**gen_kwargs)
             except Exception as e:
-                import traceback
-                tb = traceback.format_exc()
-                logger.error(f"Real Qwen-Omni speech token generation failed: {e}\n{tb}. Falling back to synthesized waveform.")
-                add_runtime_log(f"[TTS-ERROR] {type(e).__name__}: {e} | {tb.splitlines()[-3:]}")
-                
-        # Offline Speech wave synthesis fallback (Triad chord with decay envelope)
-        logger.warning(f"[TTS] Falling through to chord fallback - Omni path was skipped or failed")
-        try:
-            import wave
-            import math
-            import struct
-            
-            sample_rate = 16000
-            duration = 1.5
-            num_samples = int(sample_rate * duration)
-            freqs = [261.63, 329.63, 392.00, 523.25]
-            
-            with wave.open(file_path, 'wb') as wav_file:
-                wav_file.setnchannels(1)  # Mono
-                wav_file.setsampwidth(2)  # 16-bit
-                wav_file.setframerate(sample_rate)
-                
-                for i in range(num_samples):
-                    t = float(i) / sample_rate
-                    envelope = math.exp(-2.5 * t)
-                    value = 0
-                    for freq in freqs:
-                        value += math.sin(2.0 * math.pi * freq * t)
-                    value = (value / len(freqs)) * envelope
-                    packed_value = struct.pack('<h', int(value * 32767))
-                    wav_file.writeframesraw(packed_value)
-            # False = placeholder audio, not real speech — caller must not cache it
-            return False
-        except Exception as e:
-            logger.error(f"Offline speech synthesis fallback failed: {e}")
-            return False
+                logger.error(f"Omni generation error in thread: {e}")
+            finally:
+                q.put(None)
+
+        t = threading.Thread(target=_run, daemon=True)
+        t.start()
+
+        yielded_any = False
+        for token in streamer:
+            if token:
+                yield token
+                yielded_any = True
+
+        t.join(timeout=1.0)
+        if not yielded_any:
+            raise RuntimeError("Generation thread exited without producing tokens")
+    except Exception as e:
+        logger.error(f"Real Qwen-Omni streaming failed: {e}. Falling back to simulation.")
+        raise
+    finally:
+        for path in temp_files:
+            try:
+                if os.path.exists(path):
+                    os.remove(path)
+            except Exception as rm_err:
+                logger.warning(f"Failed to remove temp file {path}: {rm_err}")
+
+
+def _generate_vision(
+    prompt: str,
+    attachments: list[dict[str, Any]] | None,
+    max_tokens: int | None = None,
+) -> Generator[str, None, None]:
+    import base64
+    import tempfile
+
+    import openvino_genai
+
+    temp_files = []
+    image_paths = []
+
+    try:
+        if attachments:
+            for att in attachments:
+                if att.get("type") == "image" and att.get("base64"):
+                    base64_data = att["base64"]
+                    if "," in base64_data:
+                        base64_data = base64_data.split(",", 1)[1]
+                    try:
+                        file_bytes = base64.b64decode(base64_data)
+                        ext = os.path.splitext(att.get("name", "image.png"))[1] or ".png"
+                        temp_f = tempfile.NamedTemporaryFile(suffix=ext, delete=False)
+                        temp_f.write(file_bytes)
+                        temp_f.close()
+                        temp_files.append(temp_f.name)
+                        image_paths.append(temp_f.name)
+                    except Exception as dec_err:
+                        logger.error(f"Failed to decode image attachment: {dec_err}")
+
+        if not image_paths:
+            yield "Error: No image provided for vision analysis. Please upload an image."
+            return
+
+        images = [openvino_genai.Image.open(p) for p in image_paths]
+        q: queue.Queue = queue.Queue()
+        yielded_any = False
+
+        def _run():
+            nonlocal yielded_any
+            try:
+                streamer = openvino_genai.TextStreamer(_pipeline.get_tokenizer())
+                with _pipeline_lock:
+                    result = _pipeline.generate(
+                        prompt,
+                        images=images,
+                        streamer=streamer,
+                        max_new_tokens=max(16, min(int(max_tokens or 512), 512)),
+                    )
+                q.put(str(result) if result else "")
+            except Exception as e:
+                logger.error(f"Vision generation error in thread: {e}")
+                q.put(f"[Vision generation error: {e}]")
+            finally:
+                q.put(None)
+
+        t = threading.Thread(target=_run, daemon=True)
+        t.start()
+
+        while True:
+            item = q.get()
+            if item is None:
+                break
+            if item:
+                yield item
+                yielded_any = True
+
+        t.join(timeout=5.0)
+        if not yielded_any:
+            yield "Vision analysis complete but no output was generated."
+    except Exception as e:
+        logger.error(f"Real VLP streaming failed: {e}. Falling back to simulation.")
+        raise
+    finally:
+        for path in temp_files:
+            try:
+                if os.path.exists(path):
+                    os.remove(path)
+            except Exception as rm_err:
+                logger.warning(f"Failed to remove temp file {path}: {rm_err}")

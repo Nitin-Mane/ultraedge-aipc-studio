@@ -1,6 +1,7 @@
-from fastapi import APIRouter
-import psutil
 import platform
+
+import psutil
+from fastapi import APIRouter
 
 router = APIRouter()
 

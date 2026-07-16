@@ -118,6 +118,22 @@ export function PersonalAssistantPage() {
     setAgentStopped(true)
   }
 
+  useEffect(() => {
+    if (!isAudioAgentOpen) return
+
+    const previousOverflow = document.body.style.overflow
+    const closeOnEscape = (event: KeyboardEvent) => {
+      if (event.key === 'Escape') setIsAudioAgentOpen(false)
+    }
+
+    document.body.style.overflow = 'hidden'
+    window.addEventListener('keydown', closeOnEscape)
+    return () => {
+      document.body.style.overflow = previousOverflow
+      window.removeEventListener('keydown', closeOnEscape)
+    }
+  }, [isAudioAgentOpen])
+
   const getSpeechRecognition = () => (window as any).SpeechRecognition || (window as any).webkitSpeechRecognition
 
   // Voice Agent: real listen (ASR) -> think (LLM) -> speak (TTS) loop
@@ -151,7 +167,14 @@ export function PersonalAssistantPage() {
 
     // Video Chat: ask camera + mic permission and show the live stream
     if (agentVideo) {
-      navigator.mediaDevices.getUserMedia({ video: true, audio: true }).then(stream => {
+      navigator.mediaDevices.getUserMedia({
+        video: {
+          width: { ideal: 640, max: 1280 },
+          height: { ideal: 360, max: 720 },
+          frameRate: { ideal: 15, max: 24 },
+        },
+        audio: true,
+      }).then(stream => {
         cameraStreamRef.current = stream
         if (videoPreviewRef.current) videoPreviewRef.current.srcObject = stream
       }).catch(() => {
@@ -164,10 +187,11 @@ export function PersonalAssistantPage() {
       const v = videoPreviewRef.current
       if (!agentVideo || !v || !v.videoWidth) return null
       const c = document.createElement('canvas')
-      c.width = v.videoWidth
-      c.height = v.videoHeight
+      const scale = Math.min(1, 640 / v.videoWidth, 360 / v.videoHeight)
+      c.width = Math.max(1, Math.round(v.videoWidth * scale))
+      c.height = Math.max(1, Math.round(v.videoHeight * scale))
       c.getContext('2d')?.drawImage(v, 0, 0)
-      return c.toDataURL('image/png')
+      return c.toDataURL('image/jpeg', 0.72)
     }
 
     // Capture one user utterance: browser SpeechRecognition when available,
@@ -215,9 +239,10 @@ export function PersonalAssistantPage() {
           message: text,
           feature_type: agentVideo ? 'video_chat' : 'voice_agent',
           mode: 'fast',
-          internet: true,
+          max_tokens: 96,
+          internet: false,
           tools: mcpTools.filter(t => t.active).map(t => t.id),
-          attachments: frame ? [{ id: `cam-${Date.now()}`, name: 'camera-frame.png', type: 'image', size: '', base64: frame }] : []
+          attachments: frame ? [{ id: `cam-${Date.now()}`, name: 'camera-frame.jpg', type: 'image', size: '', base64: frame }] : []
         })
       })
       if (!res.ok || !res.body) throw new Error('chat backend unavailable')
@@ -230,7 +255,7 @@ export function PersonalAssistantPage() {
 
     const speak = (text: string) => new Promise<void>((resolve) => {
       // Strip markdown so TTS reads clean prose
-      const plain = text.replace(/[#*`>|_]/g, '').replace(/\[(.*?)\]\(.*?\)/g, '$1').slice(0, 600)
+      const plain = text.replace(/[#*`>|_]/g, '').replace(/\[(.*?)\]\(.*?\)/g, '$1').slice(0, 360)
       if (!plain) return resolve()
       // Model-generated speech (token2wav) is the primary spoken output;
       // browser speech synthesis is the fallback if the backend fails.
@@ -244,7 +269,7 @@ export function PersonalAssistantPage() {
         window.speechSynthesis.speak(u)
       }
       const speaker = localStorage.getItem('voice_id') || 'Chelsie'
-      const audio = new Audio(`${BACKEND_URL}/api/chat/tts?text=${encodeURIComponent(plain)}&speaker=${encodeURIComponent(speaker)}`)
+      const audio = new Audio(`${BACKEND_URL}/api/chat/tts?text=${encodeURIComponent(plain)}&speaker=${encodeURIComponent(speaker)}&profile=fast`)
       agentAudioRef.current = audio
       audio.onended = () => resolve()
       audio.onerror = () => speakWithBrowser()
@@ -1170,14 +1195,6 @@ export function PersonalAssistantPage() {
                     <Link className="w-4 h-4 shrink-0 text-edge-cyan" />
                     <span>Hooks</span>
                   </button>
-                  <button 
-                    onClick={() => navigate('/artifacts')}
-                    className="w-full flex items-center gap-3 px-3 py-2.5 rounded-lg text-sm text-text-secondary hover:text-edge-cyan hover:bg-edge-cyan/10 border border-aurora-border/30 hover:border-edge-cyan/20 transition-all font-medium animate-fade-in"
-                    title="Artifacts Manager"
-                  >
-                    <FileText className="w-4 h-4 shrink-0 text-edge-cyan" />
-                    <span>Artifacts</span>
-                  </button>
                 </div>
               </div>
 
@@ -1583,55 +1600,62 @@ export function PersonalAssistantPage() {
                </div>
 
       {isAudioAgentOpen && (
-        <div className="fixed inset-0 z-50 bg-aurora-base/95 backdrop-blur-md flex flex-col items-center justify-center p-6 text-text-primary">
-          <div className="absolute inset-0 bg-neural-grid opacity-20" />
-          <div className="absolute top-1/2 left-1/2 -translate-x-1/2 -translate-y-1/2 w-[800px] h-[800px] bg-edge-cyan/10 rounded-full blur-[140px]" />
+        <div
+          role="dialog"
+          aria-modal="true"
+          aria-labelledby="live-agent-title"
+          className="fixed inset-0 z-50 flex h-[100dvh] flex-col items-center overflow-hidden bg-aurora-base/95 p-2 text-text-primary backdrop-blur-md sm:p-4 lg:p-6"
+        >
+          <div className="pointer-events-none absolute inset-0 bg-neural-grid opacity-20" />
+          <div className="pointer-events-none absolute left-1/2 top-1/2 h-[min(800px,100vw)] w-[min(800px,100vw)] -translate-x-1/2 -translate-y-1/2 rounded-full bg-edge-cyan/10 blur-[140px]" />
           
-          <div className="relative z-10 w-full max-w-3xl flex flex-col items-center gap-8 animate-fade-in">
+          <div className="relative z-10 flex h-full min-h-0 w-full max-w-5xl animate-fade-in flex-col items-center gap-3 overflow-hidden rounded-2xl border border-aurora-border/30 bg-aurora-base/60 p-3 shadow-2xl sm:gap-4 sm:p-4">
             {/* Header */}
-            <div className="w-full flex items-center justify-between border-b border-aurora-border/20 pb-4">
-              <div className="flex items-center gap-3">
-                <Radio className="w-6 h-6 text-edge-cyan animate-pulse" />
-                <div>
-                  <h2 className="text-xl font-bold text-text-primary">{agentVideo ? 'Video Chat' : 'Voice Chat'}</h2>
-                  <p className="text-xs text-text-secondary">Qwen Omni Agent • Speech in, speech out</p>
+            <div className="sticky top-0 z-20 flex w-full shrink-0 items-center justify-between gap-2 border-b border-aurora-border/30 bg-aurora-base/90 pb-3">
+              <div className="flex min-w-0 items-center gap-2 sm:gap-3">
+                <Radio className="h-5 w-5 shrink-0 animate-pulse text-edge-cyan sm:h-6 sm:w-6" />
+                <div className="min-w-0">
+                  <h2 id="live-agent-title" className="truncate text-sm font-bold text-text-primary sm:text-xl">{agentVideo ? 'Video Chat' : 'Voice Chat'}</h2>
+                  <p className="hidden truncate text-xs text-text-secondary sm:block">Qwen Omni Agent • Speech in, speech out</p>
                 </div>
               </div>
-              <span className="text-xs font-mono text-text-secondary bg-aurora-surface px-3 py-1.5 rounded-lg border border-aurora-border/40">
+              <span className="hidden shrink-0 rounded-lg border border-aurora-border/40 bg-aurora-surface px-3 py-1.5 font-mono text-xs text-text-secondary md:inline-flex">
                 {`${Math.floor(agentElapsed / 60).toString().padStart(2, '0')}:${(agentElapsed % 60).toString().padStart(2, '0')} / 10:00`}
               </span>
-              <div className="flex items-center gap-2">
+              <div className="flex shrink-0 items-center gap-1 sm:gap-2">
                 <Button
                   variant="ghost"
                   size="sm"
                   onClick={stopAgent}
                   disabled={agentStopped}
-                  className="text-status-error hover:bg-status-error/10 p-2 rounded-xl flex items-center gap-1.5 text-xs font-bold disabled:opacity-40"
+                  className="flex h-9 items-center gap-1.5 rounded-xl px-2.5 text-xs font-bold text-status-error hover:bg-status-error/10 disabled:opacity-40 sm:px-3"
                   title="Stop the session (keeps transcript open)"
+                  aria-label="Stop live session"
                 >
-                  <Square className="w-4 h-4" /> Stop
+                  <Square className="h-3.5 w-3.5" /> Stop
                 </Button>
                 <Button
                   variant="ghost"
                   size="sm"
-                  onClick={() => setIsAudioAgentOpen(false)}
-                  className="text-text-secondary hover:text-text-primary hover:bg-aurora-surface-hover p-2 rounded-xl"
+                  onClick={() => { stopAgent(); setIsAudioAgentOpen(false) }}
+                  className="flex h-9 items-center gap-1.5 rounded-xl px-2.5 text-xs font-bold text-text-secondary hover:bg-aurora-surface-hover hover:text-text-primary sm:px-3"
                   title="Close and open the conversation in chat"
+                  aria-label="Close live session and return to chat"
                 >
-                  <X className="w-5 h-5" />
+                  <X className="h-4 w-4" /> Close
                 </Button>
               </div>
             </div>
 
             {/* Video stream (Video Chat) or glowing agent sphere (Voice Chat) */}
-            <div className="flex flex-col items-center justify-center py-6 relative w-full">
+            <div className="relative flex min-h-0 w-full flex-1 flex-col items-center justify-center overflow-hidden py-2 sm:py-3">
               {agentVideo ? (
                 <video
                   ref={videoPreviewRef}
                   autoPlay
                   muted
                   playsInline
-                  className="w-full max-w-xl rounded-2xl border border-aurora-border/50 shadow-2xl bg-aurora-surface"
+                  className="block h-full min-h-0 w-full rounded-2xl border border-aurora-border/50 bg-aurora-surface object-contain shadow-2xl"
                 />
               ) : (
                 <>
@@ -1653,8 +1677,8 @@ export function PersonalAssistantPage() {
                 </>
               )}
 
-              <div className="mt-6 text-center">
-                <span className={`text-xs font-bold uppercase tracking-wider px-3 py-1 rounded-full border ${
+              <div className="absolute left-1/2 top-4 -translate-x-1/2 text-center">
+                <span aria-live="polite" className={`whitespace-nowrap rounded-full border px-3 py-1 text-[10px] font-bold uppercase tracking-wider sm:text-xs ${
                   audioAgentStatus === 'listening' ? 'bg-edge-cyan/10 border-edge-cyan/30 text-edge-cyan' :
                   audioAgentStatus === 'thinking' ? 'bg-status-warning/10 border-status-warning/30 text-status-warning' :
                   'bg-qwen-violet/10 border-qwen-violet/30 text-qwen-violet'
@@ -1668,7 +1692,7 @@ export function PersonalAssistantPage() {
             </div>
 
             {/* Speech Waveform Visualizer */}
-            <div className="w-full h-20 flex items-end justify-center gap-1.5 px-10">
+            <div className="flex h-12 w-full shrink-0 items-center justify-center gap-1 overflow-hidden px-3 sm:h-16 sm:gap-1.5 sm:px-8" aria-hidden="true">
               {Array.from({ length: 24 }).map((_, idx) => {
                 const heights = {
                   listening: [24, 48, 12, 60, 36, 72, 16, 50, 20, 80, 40, 64, 18, 55, 30, 75, 14, 42, 28, 58, 22, 46, 32, 10],
@@ -1685,7 +1709,7 @@ export function PersonalAssistantPage() {
                       repeatType: "reverse",
                       duration: 0.3 + (idx % 4) * 0.1
                     }}
-                    className={`w-2.5 rounded-full ${
+                    className={`max-h-12 w-1 rounded-full sm:w-1.5 ${
                       audioAgentStatus === 'listening' ? 'bg-edge-cyan' :
                       audioAgentStatus === 'thinking' ? 'bg-status-warning' :
                       'bg-qwen-violet'
@@ -1696,7 +1720,7 @@ export function PersonalAssistantPage() {
             </div>
 
             {/* Conversation Log / Transcripts */}
-            <div className="w-full bg-aurora-surface border border-aurora-border/60 rounded-2xl p-5 shadow-2xl h-48 overflow-y-auto flex flex-col gap-4">
+            <div className="flex h-24 w-full shrink-0 flex-col gap-3 overflow-y-auto rounded-2xl border border-aurora-border/60 bg-aurora-surface p-3 shadow-2xl sm:h-32 sm:p-4 lg:h-40">
               {audioAgentTranscript.length === 0 && (
                 <p className="text-xs text-text-muted m-auto select-none">Listening... speak into your microphone to start the conversation.</p>
               )}
@@ -1717,14 +1741,13 @@ export function PersonalAssistantPage() {
             </div>
 
             {/* Footer status & information */}
-            <div className="w-full flex items-center justify-between text-xs text-text-muted pt-2 border-t border-aurora-border/20">
-              <div className="flex items-center gap-2">
-                <span className="w-2 h-2 rounded-full bg-emerald-400" />
-                <span>Intel OpenVINO GPU Pipeline (FP16)</span>
+            <div className="flex w-full shrink-0 items-center justify-between gap-3 border-t border-aurora-border/20 pt-2 text-[10px] text-text-muted sm:text-xs">
+              <div className="flex min-w-0 items-center gap-2">
+                <span className={`h-2 w-2 shrink-0 rounded-full ${agentStopped ? 'bg-text-muted' : 'bg-emerald-400'}`} />
+                <span className="truncate">{agentStopped ? 'Session stopped — transcript remains available' : 'Local Intel OpenVINO GPU pipeline (FP16)'}</span>
               </div>
-              <div className="flex items-center gap-2">
-                <span>Latency: ~85ms ASR, ~140ms TTS</span>
-              </div>
+              <span className="shrink-0 font-mono md:hidden">{`${Math.floor(agentElapsed / 60).toString().padStart(2, '0')}:${(agentElapsed % 60).toString().padStart(2, '0')}`}</span>
+              <span className="hidden shrink-0 md:inline">Press Esc to close</span>
             </div>
           </div>
         </div>

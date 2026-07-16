@@ -1,7 +1,6 @@
 import { ModelInfo } from '../store/useAppStore'
 
 // Qwen Model Catalog Registry - All models from Qwen_OpenVINO
-// RAG models (embedding/reranker) are excluded for beta — see export filter below.
 const ALL_QWEN_MODELS: ModelInfo[] = [
   // ============================================
   // Qwen3-VL - Vision Language Model
@@ -358,194 +357,6 @@ const ALL_QWEN_MODELS: ModelInfo[] = [
   },
 
   // ============================================
-  // Qwen3-Embedding - Text Embedding
-  // ============================================
-  {
-    id: 'qwen3-embedding-06b',
-    name: 'Qwen3-Embedding-0.6B',
-    family: 'Qwen3-Embedding',
-    featureType: 'rag_assistant',
-    parameterSize: '0.6B',
-    license: 'Apache-2.0',
-    sourceUrl: 'https://huggingface.co/Qwen/Qwen3-Embedding-0.6B',
-    packageType: 'safetensors',
-    precisionOptions: ['FP16', 'INT8', 'INT4'],
-    recommendedRamGb: 2,
-    recommendedDevice: 'AUTO',
-    npuStatus: 'supported',
-    openvinoStatus: 'converted',
-    benchmarkStatus: 'completed',
-    lastUpdated: '2026-07-04',
-    state: 'ready',
-    localOpenVinoPath: 'models/qwen3-embedding-06b-ov',
-    diskSizeGb: 1.0,
-    benchmark: {
-      device: 'NPU',
-      precision: 'INT8',
-      firstTokenLatency: 3.2,
-      tokensPerSecond: 145.8,
-      loadTimeMs: 400,
-      ramUsedMb: 800,
-      gpuUsedMb: 0,
-      npuStatus: 'available',
-    },
-  },
-  {
-    id: 'qwen3-embedding-4b',
-    name: 'Qwen3-Embedding-4B',
-    family: 'Qwen3-Embedding',
-    featureType: 'rag_assistant',
-    parameterSize: '4B',
-    license: 'Apache-2.0',
-    sourceUrl: 'https://huggingface.co/Qwen/Qwen3-Embedding-4B',
-    packageType: 'safetensors',
-    precisionOptions: ['FP16', 'INT8', 'INT4'],
-    recommendedRamGb: 8,
-    recommendedDevice: 'GPU',
-    npuStatus: 'unknown',
-    openvinoStatus: 'converted',
-    benchmarkStatus: 'completed',
-    lastUpdated: '2026-07-04',
-    state: 'ready',
-    localOpenVinoPath: 'models/qwen3-embedding-4b-ov',
-    diskSizeGb: 7.8,
-    benchmark: {
-      device: 'GPU',
-      precision: 'INT4',
-      firstTokenLatency: 5.8,
-      tokensPerSecond: 98.5,
-      loadTimeMs: 700,
-      ramUsedMb: 3800,
-      gpuUsedMb: 3200,
-      npuStatus: 'not_applicable',
-    },
-  },
-  {
-    id: 'qwen3-embedding-8b',
-    name: 'Qwen3-Embedding-8B',
-    family: 'Qwen3-Embedding',
-    featureType: 'rag_assistant',
-    parameterSize: '8B',
-    license: 'Apache-2.0',
-    sourceUrl: 'https://huggingface.co/Qwen/Qwen3-Embedding-8B',
-    packageType: 'safetensors',
-    precisionOptions: ['FP16', 'INT8', 'INT4'],
-    recommendedRamGb: 16,
-    recommendedDevice: 'GPU',
-    npuStatus: 'unknown',
-    openvinoStatus: 'converted',
-    benchmarkStatus: 'completed',
-    lastUpdated: '2026-07-04',
-    state: 'ready',
-    localOpenVinoPath: 'models/qwen3-embedding-8b-ov',
-    diskSizeGb: 15.5,
-    benchmark: {
-      device: 'GPU',
-      precision: 'INT4',
-      firstTokenLatency: 8.2,
-      tokensPerSecond: 72.4,
-      loadTimeMs: 1200,
-      ramUsedMb: 7500,
-      gpuUsedMb: 6800,
-      npuStatus: 'not_applicable',
-    },
-  },
-
-  // ============================================
-  // Qwen3-Reranker - Text Reranker
-  // ============================================
-  {
-    id: 'qwen3-reranker-06b',
-    name: 'Qwen3-Reranker-0.6B',
-    family: 'Qwen3-Reranker',
-    featureType: 'rag_assistant',
-    parameterSize: '0.6B',
-    license: 'Apache-2.0',
-    sourceUrl: 'https://huggingface.co/Qwen/Qwen3-Reranker-0.6B',
-    packageType: 'safetensors',
-    precisionOptions: ['FP16', 'INT8', 'INT4'],
-    recommendedRamGb: 2,
-    recommendedDevice: 'AUTO',
-    npuStatus: 'supported',
-    openvinoStatus: 'converted',
-    benchmarkStatus: 'completed',
-    lastUpdated: '2026-07-04',
-    state: 'ready',
-    localOpenVinoPath: 'models/qwen3-reranker-06b-ov',
-    diskSizeGb: 1.0,
-    benchmark: {
-      device: 'NPU',
-      precision: 'INT8',
-      firstTokenLatency: 2.8,
-      tokensPerSecond: 155.2,
-      loadTimeMs: 350,
-      ramUsedMb: 750,
-      gpuUsedMb: 0,
-      npuStatus: 'available',
-    },
-  },
-  {
-    id: 'qwen3-reranker-4b',
-    name: 'Qwen3-Reranker-4B',
-    family: 'Qwen3-Reranker',
-    featureType: 'rag_assistant',
-    parameterSize: '4B',
-    license: 'Apache-2.0',
-    sourceUrl: 'https://huggingface.co/Qwen/Qwen3-Reranker-4B',
-    packageType: 'safetensors',
-    precisionOptions: ['FP16', 'INT8', 'INT4'],
-    recommendedRamGb: 8,
-    recommendedDevice: 'GPU',
-    npuStatus: 'unknown',
-    openvinoStatus: 'converted',
-    benchmarkStatus: 'completed',
-    lastUpdated: '2026-07-04',
-    state: 'ready',
-    localOpenVinoPath: 'models/qwen3-reranker-4b-ov',
-    diskSizeGb: 7.6,
-    benchmark: {
-      device: 'GPU',
-      precision: 'INT4',
-      firstTokenLatency: 4.5,
-      tokensPerSecond: 105.8,
-      loadTimeMs: 650,
-      ramUsedMb: 3600,
-      gpuUsedMb: 3000,
-      npuStatus: 'not_applicable',
-    },
-  },
-  {
-    id: 'qwen3-reranker-8b',
-    name: 'Qwen3-Reranker-8B',
-    family: 'Qwen3-Reranker',
-    featureType: 'rag_assistant',
-    parameterSize: '8B',
-    license: 'Apache-2.0',
-    sourceUrl: 'https://huggingface.co/Qwen/Qwen3-Reranker-8B',
-    packageType: 'safetensors',
-    precisionOptions: ['FP16', 'INT8', 'INT4'],
-    recommendedRamGb: 16,
-    recommendedDevice: 'GPU',
-    npuStatus: 'unknown',
-    openvinoStatus: 'converted',
-    benchmarkStatus: 'completed',
-    lastUpdated: '2026-07-04',
-    state: 'ready',
-    localOpenVinoPath: 'models/qwen3-reranker-8b-ov',
-    diskSizeGb: 15.2,
-    benchmark: {
-      device: 'GPU',
-      precision: 'INT4',
-      firstTokenLatency: 6.8,
-      tokensPerSecond: 82.5,
-      loadTimeMs: 1100,
-      ramUsedMb: 7200,
-      gpuUsedMb: 6500,
-      npuStatus: 'not_applicable',
-    },
-  },
-
-  // ============================================
   // Qwen-Image - Text-to-Image Generation
   // ============================================
   {
@@ -716,9 +527,14 @@ const ALL_QWEN_MODELS: ModelInfo[] = [
   },
 ]
 
-export const QWEN_MODEL_CATALOG: ModelInfo[] = ALL_QWEN_MODELS.filter(
-  (m) => m.featureType !== 'rag_assistant'
-)
+export const QWEN_MODEL_CATALOG: ModelInfo[] = ALL_QWEN_MODELS
+
+// The two models actively supported in this release.
+// These map to the dashboard workspace tiles (Personal Assistant + Coding Agent).
+export const ACTIVE_MODEL_IDS = {
+  personalAssistant: 'Qwen2.5-Omni-3B',
+  codingAgent: 'Qwen2.5-Coder-1.5B-Instruct-ov-int4',
+} as const
 
 // Model feature types with display info
 export const MODEL_FEATURE_TYPES = {

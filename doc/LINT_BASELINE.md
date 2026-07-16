@@ -11,8 +11,7 @@ Top: I001 unsorted-imports (23), B904 raise-without-from (21),
      UP035 deprecated-import (18), UP028 yield-in-for-loop (6)
 ```
 
-Note: the one F821 (real bug: `OVModelForFeatureExrection` typo in
-`app/rag/embedder.py`) was fixed immediately rather than baselined.
+Note: F821 errors should be fixed immediately rather than baselined.
 
 ## Frontend — eslint (`frontend/.eslintrc.cjs`)
 

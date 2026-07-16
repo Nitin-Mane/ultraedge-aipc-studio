@@ -35,7 +35,7 @@ export function TopBar() {
   // Voice Settings — normalize legacy values to actual speaker IDs
   const [voiceId, setVoiceId] = useState(() => {
     const raw = localStorage.getItem('voice_id') || 'Chelsie'
-    const map = { 'Female (Intel AI)': 'Chelsie', 'Male (Intel AI)': 'Ethan' }
+    const map: Record<string, string> = { 'Female (Intel AI)': 'Chelsie', 'Male (Intel AI)': 'Ethan' }
     const normalized = map[raw] || raw
     if (normalized !== raw) localStorage.setItem('voice_id', normalized)
     return normalized

@@ -1,10 +1,11 @@
-import sqlite3
 import os
-import json
+import sqlite3
 from datetime import datetime
 
-DATABASE_DIR = os.path.abspath(os.path.join(os.path.dirname(__file__), "..", "..", "app_data"))
-DATABASE_PATH = os.path.join(DATABASE_DIR, "ultraedge_aipc_studio.db")
+from app.config import settings
+
+DATABASE_DIR = str(settings.APP_DATA_DIR)
+DATABASE_PATH = str(settings.APP_DATA_DIR / "ultraedge_aipc_studio.db")
 
 def get_db_connection():
     os.makedirs(DATABASE_DIR, exist_ok=True)
@@ -149,33 +150,7 @@ def init_db():
     );
     """)
     
-    # 9. documents
-    cursor.execute("""
-    CREATE TABLE IF NOT EXISTS documents (
-        id TEXT PRIMARY KEY,
-        title TEXT NOT NULL,
-        file_path TEXT NOT NULL,
-        file_type TEXT,
-        hash TEXT,
-        indexed INTEGER DEFAULT 0,
-        created_at TEXT NOT NULL
-    );
-    """)
-    
-    # 10. rag_indexes
-    cursor.execute("""
-    CREATE TABLE IF NOT EXISTS rag_indexes (
-        id TEXT PRIMARY KEY,
-        document_id TEXT NOT NULL,
-        vector_store_path TEXT NOT NULL,
-        embedding_model_id TEXT,
-        chunk_count INTEGER,
-        created_at TEXT NOT NULL,
-        FOREIGN KEY(document_id) REFERENCES documents(id) ON DELETE CASCADE
-    );
-    """)
-    
-    # 11. tool_calls
+    # 9. tool_calls
     cursor.execute("""
     CREATE TABLE IF NOT EXISTS tool_calls (
         id TEXT PRIMARY KEY,
