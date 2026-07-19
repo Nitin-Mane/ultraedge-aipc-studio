@@ -131,7 +131,6 @@ load time when measured results are available. The empty state is shown below.
 
 ![Benchmark Studio empty state](docs/screenshots/benchmark-studio.png)
 
-[![Star History Chart](https://api.star-history.com/svg?repos=Nitin-Mane/ultraedge-aipc-studio&type=Date)](https://star-history.com/#Nitin-Mane/ultraedge-aipc-studio&Date)
 
 ### Security and Privacy
 
